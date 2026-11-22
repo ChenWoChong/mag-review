@@ -11,7 +11,8 @@ export function parseEntries(markdown) {
   const entries = [];
   let i = 0;
   while (i < lines.length) {
-    if (!/^<!-- magpie-prompt:[a-f0-9]{64} -->$/.test(lines[i])) { i++; continue; }
+    const marker = /^<!-- magpie-prompt:([a-f0-9]{64}) -->$/.exec(lines[i]);
+    if (!marker) { i++; continue; }
     const header = /^## (\d{2}:\d{2}:\d{2}) · (.*?) · (.*)$/.exec(lines[++i] || '');
     if (!header) continue;
     while (i + 1 < lines.length && !lines[i + 1].trim()) i++;
@@ -21,11 +22,16 @@ export function parseEntries(markdown) {
     while (++i < lines.length && lines[i] !== fence[1]) text.push(lines[i]);
     if (i === lines.length) break;
     const images = [];
+    let sessionHash = '', nativeEvent = '';
     while (++i < lines.length && !/^<!-- magpie-prompt:[a-f0-9]{64} -->$/.test(lines[i])) {
       const match = /^!\[附件\]\((attachments\/[a-f0-9]{64}\.(?:png|jpg|gif|webp))\)$/.exec(lines[i]);
       if (match) images.push(match[1]);
+      const session = /^<!-- magpie-session:([a-f0-9]{64}) -->$/.exec(lines[i]);
+      if (session) sessionHash = session[1];
+      const event = /^<!-- magpie-event:([a-f0-9]{64}) -->$/.exec(lines[i]);
+      if (event) nativeEvent = event[1];
     }
-    entries.push({ time: header[1], agent: header[2], cwd: header[3], text: text.join('\n'), images });
+    entries.push({ id: marker[1], time: header[1], agent: header[2], cwd: header[3], text: text.join('\n'), images, sessionHash, nativeEvent });
   }
   return entries;
 }

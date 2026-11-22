@@ -3,6 +3,8 @@ import { appendFile, chmod, mkdir, readFile, readdir, writeFile } from 'node:fs/
 import { join } from 'node:path';
 import { directoryFor } from './storage.js';
 import { imageType, isAutomaticPrompt } from './diary.js';
+import { hashText } from './identity.js';
+import { nativeEvent } from './native-lookup.js';
 
 const indexes = new Map();
 let pending = Promise.resolve();
@@ -31,8 +33,13 @@ function fingerprint(body, ctx, prompt) {
   const lastPrompt = history.findLastIndex((text) => text.includes(prompt));
   if (lastPrompt >= 0) history = history.slice(0, lastPrompt + 1);
   else history.push(prompt);
+  // A named session and the occurrence number of the same user text remain
+  // stable when a tool round changes unrelated messages in the history.
+  // Without a session, retain the full history rather than merging all users.
+  const occurrence = history.filter(text => text.includes(prompt)).length;
   return createHash('sha256').update(JSON.stringify([
-    ctx.caller?.agent || ctx.agent || '', ctx.session || '', ctx.cwd || '', history,
+    ctx.caller?.agent || ctx.agent || '', ctx.session || '', ctx.cwd || '',
+    ctx.session ? [prompt, occurrence] : history,
   ])).digest('hex');
 }
 
@@ -96,7 +103,8 @@ async function record(body, ctx) {
   if (isAutomaticPrompt(ctx.caller?.agent || ctx.agent, prompt)) return;
   const directory = directoryFor(ctx.options);
   const seen = await loadIndex(directory);
-  const id = fingerprint(body, ctx, prompt);
+  const native = await nativeEvent(directory, ctx.session, prompt);
+  const id = native || fingerprint(body, ctx, prompt);
   if (seen.has(id)) return;
   const { day, time } = dayAndTime(new Date());
   const path = join(directory, `${day}.md`);
@@ -104,7 +112,8 @@ async function record(body, ctx) {
   const fence = '`'.repeat(longest + 1);
   const agent = label(ctx.caller?.agent || ctx.agent);
   const images = await saveImages(body, prompt, directory);
-  const entry = `\n<!-- magpie-prompt:${id} -->\n## ${time} · ${agent} · ${label(ctx.cwd)}\n\n${fence}text\n${prompt}\n${fence}\n${images.join('\n')}${images.length ? '\n' : ''}`;
+  const metadata = `${ctx.session ? `<!-- magpie-session:${hashText(ctx.session)} -->\n` : ''}${native ? `<!-- magpie-event:${native} -->\n` : ''}`;
+  const entry = `\n<!-- magpie-prompt:${id} -->\n## ${time} · ${agent} · ${label(ctx.cwd)}\n\n${fence}text\n${prompt}\n${fence}\n${metadata}${images.join('\n')}${images.length ? '\n' : ''}`;
   await appendFile(path, entry, { encoding: 'utf8', mode: 0o600 });
   // Existing files could have been created with wider permissions.
   await chmod(path, 0o600);

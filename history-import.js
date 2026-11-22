@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { directoryFor } from './storage.js';
 import * as zlib from 'node:zlib';
+import { eventKey, hashText } from './identity.js';
 
 const exec = promisify(execFile);
 const childEnv = { ...process.env, MAGPIE_PROMPT_IMPORT_CHILD: '1' };
@@ -15,6 +16,12 @@ function contentOf(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content.filter(p => p && ['text', 'input_text'].includes(p.type) && typeof p.text === 'string').map(p => p.text).join('\n');
+}
+
+function uniqueTimes(source) {
+  const counts = new Map();
+  for (const message of source) counts.set(message.time, (counts.get(message.time) || 0) + 1);
+  return counts;
 }
 
 export function sourceMessages(agent, raw) {
@@ -42,6 +49,7 @@ export function sourceMessages(agent, raw) {
 }
 
 export function matchMessages(session, transcript, source) {
+  const times = uniqueTimes(source);
   const remaining = new Map();
   for (const p of transcript.parts || []) {
     if (p.role !== 'user' || p.kind !== 'text' || !p.text?.trim()) continue;
@@ -54,7 +62,7 @@ export function matchMessages(session, transcript, source) {
     remaining.set(text, remaining.get(text) - 1);
     if (/^Generate a title that will help the user recognize this T3 Code thread/.test(text)) continue;
     const id = createHash('sha256').update(JSON.stringify([session.agent, session.id, msg.event, msg.time, text])).digest('hex');
-    entries.push({ id, time: msg.time, text: msg.text, agent: session.app || session.agent, cwd: session.cwd || '', session: session.id });
+    entries.push({ id, time: msg.time, text: msg.text, agent: session.app || session.agent, cwd: session.cwd || '', session: session.id, nativeEvent: (msg.event || times.get(msg.time) === 1) ? eventKey(session.id, msg) : '' });
   }
   return entries;
 }
@@ -86,7 +94,7 @@ export async function importHistory(options = {}) {
     const { stdout } = await exec('sqlite3', ['-readonly', '-separator', '\t', cache, 'select key,path from files order by key'], { env: childEnv, maxBuffer: 20 * 1024 * 1024 });
     const refs = stdout.split('\n').filter(Boolean).map(line => line.split('\t'));
     let index = 0, read = 0, failed = 0, truncated = 0, unsupported = 0, unmatched = 0;
-    const records = [];
+    const records = [], anchors = [], sources = {};
     async function worker() {
       while (index < refs.length) {
         const [ref, sourcePath] = refs[index++];
@@ -98,7 +106,13 @@ export async function importHistory(options = {}) {
           const bytes = await readFile(sourcePath);
           if (sourcePath.endsWith('.zst') && typeof zlib.zstdDecompressSync !== 'function') throw new Error('zstd unavailable');
           const raw = sourcePath.endsWith('.zst') ? zlib.zstdDecompressSync(bytes).toString('utf8') : bytes.toString('utf8');
-          const found = matchMessages(session, transcript, sourceMessages(agent, raw));
+          const source = sourceMessages(agent, raw);
+          sources[session.id] = { agent, path: sourcePath };
+          const times = uniqueTimes(source);
+          for (const message of source) {
+            if (message.event || times.get(message.time) === 1) anchors.push({ session: hashText(session.id), text: hashText(message.text.trim()), time: message.time, id: eventKey(session.id, message) });
+          }
+          const found = matchMessages(session, transcript, source);
           const expected = (transcript.parts || []).filter(p => p.role === 'user' && p.kind === 'text' && p.text?.trim() && !/^Generate a title that will help the user recognize this T3 Code thread/.test(p.text)).length;
           unmatched += Math.max(0, expected - found.length);
           records.push(...found);
@@ -114,14 +128,17 @@ export async function importHistory(options = {}) {
     const ids = new Set(records.map(r => r.id));
     if (failed || unsupported) {
       for (const record of previous?.records || []) if (!ids.has(record.id)) records.push(record);
+      const anchorIds = new Set(anchors.map(anchor => anchor.id));
+      for (const anchor of previous?.anchors || []) if (!anchorIds.has(anchor.id)) anchors.push(anchor);
+      for (const [id, source] of Object.entries(previous?.sources || {})) sources[id] ||= source;
     }
     records.sort((a, b) => a.time.localeCompare(b.time));
-    const snapshot = { version: 1, updated: new Date().toISOString(), sessions: refs.length, read, failed, truncated, unsupported, unmatched, records };
+    const snapshot = { version: 1, updated: new Date().toISOString(), sessions: refs.length, read, failed, truncated, unsupported, unmatched, records, anchors, sources };
     const tmp = join(directory, `.history-${process.pid}.tmp`);
     await writeFile(tmp, JSON.stringify(snapshot), { mode: 0o600 });
     await rename(tmp, join(directory, fileName));
     await rm(join(directory, '.history-error'), { force: true });
-    return { ...snapshot, records: records.length };
+    return { version: snapshot.version, updated: snapshot.updated, sessions: refs.length, read, failed, truncated, unsupported, unmatched, records: records.length };
   } catch (error) {
     await writeFile(join(directory, '.history-error'), '历史同步失败：请确认 Magpie 已允许读取会话，并且 sqlite3 可用。', { mode: 0o600 }).catch(() => {});
     throw error;

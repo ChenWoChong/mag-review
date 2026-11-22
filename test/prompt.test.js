@@ -35,6 +35,20 @@ test('Codex Responses requests record each user turn once, even across tool call
   assert.equal((await stat(join(directory, file))).mode & 0o777, 0o600);
 }));
 
+test('a tool round changing unrelated user context does not create another prompt', async () => withDirectory(async (directory) => {
+  const ctx = context(directory, 't3code', '请检查代码');
+  const question = { role: 'user', content: ctx.query };
+  await onRequest({ input: [{ role: 'user', content: '项目背景' }, question] }, ctx);
+  await onRequest({ input: [{ role: 'user', content: '更新后的项目背景' }, question, { type: 'function_call_output', output: 'done' }] }, ctx);
+  assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 1);
+}));
+
+test('does not capture a T3 Code title generation request', async () => withDirectory(async (directory) => {
+  const query = 'Generate a title that will help the user recognize this T3 Code thread weeks later.\\nUser message: hello';
+  await onRequest({ input: [{ role: 'user', content: query }] }, context(directory, 't3code', query));
+  assert.equal(await log(directory), '');
+}));
+
 test('Claude and Pi tool results are ignored for deduplication', async () => withDirectory(async (directory) => {
   for (const agent of ['claude', 'pi']) {
     const ctx = context(directory, agent, '检查这个项目');
@@ -67,4 +81,18 @@ test('uses a longer Markdown fence when prompt contains code fences', async () =
   const prompt = '```js\nhello()\n```';
   await onRequest({ messages: [{ role: 'user', content: prompt }] }, context(directory, 'pi', prompt));
   assert.match(await log(directory), /````text\n```js\nhello\(\)\n```\n````/);
+}));
+
+test('uses a stable native message ID across retries but keeps a new identical message', async () => withDirectory(async (directory) => {
+  const { appendFile, writeFile } = await import('node:fs/promises');
+  const file = join(directory, 'session.jsonl');
+  const mk = (id, timestamp) => JSON.stringify({ type: 'response_item', timestamp, payload: { type: 'message', role: 'user', id, content: [{ type: 'input_text', text: '再试一次' }] } }) + '\n';
+  await writeFile(file, mk('msg-one', '2026-11-22T03:00:00Z'));
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records: [], sources: { 'session-1': { agent: 'codex', path: file } } }));
+  const ctx = context(directory, 't3code', '再试一次');
+  await onRequest({ input: [{ role: 'user', content: ctx.query }] }, ctx);
+  await onRequest({ input: [{ role: 'user', content: '变化的上下文' }, { role: 'user', content: ctx.query }] }, ctx);
+  await appendFile(file, mk('msg-two', '2026-11-22T03:01:00Z'));
+  await onRequest({ input: [{ role: 'user', content: ctx.query }, { role: 'user', content: ctx.query }] }, ctx);
+  assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 2);
 }));

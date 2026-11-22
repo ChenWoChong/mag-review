@@ -1,0 +1,26 @@
+{
+  "name": "magpie-prompt-diary",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Record prompts observed by the Magpie gateway in local daily Markdown files.",
+  "magpie": {
+    "hooks": "./prompt.hooks.js",
+    "page": {
+      "title": "Prompt Diary",
+      "titles": {
+        "zh": "Prompt 日记",
+        "zh-TW": "Prompt 日記"
+      },
+      "file": "page/index.html"
+    }
+  },
+  "scripts": {
+    "test": "node --test",
+    "verify-history": "node scripts/verify-history.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./index.js"
+}

@@ -59,7 +59,8 @@ test('renders separate cards and saved images while preserving original copy tex
   const html = await response.text();
   assert.equal((html.match(/<article class="card">/g) || []).length, 2);
   assert.match(html, /data-copy="看看图片\n换行"/);
-  assert.match(html, /<img src="data:image\/png;base64,/);
+  assert.match(html, /<button type="button" class="image-preview" aria-label="放大查看图片"><img src="data:image\/png;base64,/);
+  assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
   assert.match(html, /没有图片 &lt;hello&gt;/);
   assert.match(response.headers.get('content-security-policy'), /img-src data:/);
 }));
@@ -73,7 +74,7 @@ test('shows imported dates and merges matching live records without removing the
   const html = await response.text();
   assert.match(html, /2026-01-02/);
   assert.equal((html.match(/<article class="card">/g) || []).length, 1);
-  assert.match(html, /刷新历史/);
+  assert.match(html, /搜索 Prompt/);
 }));
 
 test('filters records and keeps favorites and tags locally with a protected action', async () => withServer(async (directory, url) => {
@@ -146,9 +147,9 @@ test('follows Magpie theme updates and ignores other windows', async () => withS
   const root = { dataset: {}, style: { setProperty: (key, value) => properties.set(key, value), removeProperty: key => properties.delete(key) } };
   let listener, request;
   const parent = { postMessage: message => { request = message; } };
-  const window = { parent, addEventListener: (_event, callback) => { listener = callback; } };
+  const window = { parent, addEventListener: (event, callback) => { if (event === 'message') listener = callback; } };
   const document = { documentElement: root, querySelector: () => null, addEventListener: () => {} };
-  runInNewContext(script, { window, document, setTimeout });
+  runInNewContext(script, { window, document, setTimeout, location: { pathname: '/', search: '' } });
   assert.equal(request.method, 'theme');
   listener({ source: parent, data: { magpie: 1, id: request.id, result: { dark: false, tokens: { bg: '#fff' } } } });
   assert.equal(root.dataset.theme, 'light');
@@ -159,4 +160,147 @@ test('follows Magpie theme updates and ignores other windows', async () => withS
   assert.equal(root.dataset.theme, 'dark');
   assert.equal(root.style.colorScheme, 'dark');
   assert.equal(properties.get('--magpie-bg'), '#111');
+}));
+
+
+test('time ranges combine with categories and calendar selection clears the range', async () => withServer(async (directory, url) => {
+  const atDaysAgo = days => { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - days); return d; };
+  const records = [0, 6, 35].map((days, i) => ({ id: String(i + 1).repeat(64), time: atDaysAgo(days).toISOString(), text: `范围记录${i}`, cwd: '/work', agent: 'codex', images: [] }));
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  await writeFile(join(directory, '.annotations.json'), JSON.stringify({ version: 1, entries: { [records[0].id]: { favorite: true, tags: [], hidden: false } }, pinned: [] }));
+  const today = await (await fetch(`${url}/?range=today`)).text();
+  assert.match(today, /范围记录0/);
+  assert.doesNotMatch(today, /范围记录1/);
+  assert.match(today, /选择时间范围">当天/);
+  assert.doesNotMatch(today, /颜色表示当天已收录的记录|统计仅包含已收录的记录|已读取 1\/1 个会话/);
+  const last7 = await (await fetch(`${url}/?range=last-7`)).text();
+  assert.match(last7, /范围记录0/);
+  assert.match(last7, /范围记录1/);
+  assert.doesNotMatch(last7, /范围记录2/);
+  const favorites = await (await fetch(`${url}/?range=last-7&view=favorites`)).text();
+  assert.match(favorites, /范围记录0/);
+  assert.doesNotMatch(favorites, /范围记录1/);
+  const month = await (await fetch(`${url}/?range=month`)).text();
+  assert.doesNotMatch(month, /范围记录2/);
+  const week = await (await fetch(`${url}/?range=this-week`)).text();
+  assert.match(week, /范围记录0/);
+  const nav = /<nav class="navigation"[^>]*>(.*?)<\/nav>/.exec(last7)[1];
+  assert.equal((nav.match(/class="nav-item/g) || []).length, 3);
+  assert.match(last7, /选择时间范围/);
+  const calendar = /<div class="heatmap">(.*?)<\/div>/.exec(last7)[1];
+  assert.doesNotMatch(calendar, /range=last-7/);
+}));
+
+
+test('filters without navigation using a protected local request', async () => withServer(async (directory, url) => {
+  const page = await (await fetch(url)).text();
+  const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
+  const send = (body, origin = 'null') => fetch(`${url}/filter`, { method: 'POST', headers: { origin, 'content-type': 'text/plain' }, body: JSON.stringify(body) });
+  assert.equal((await send({ token: 'invalid', path: '/?range=today' })).status, 403);
+  assert.equal((await send({ token, path: '/?range=today' }, 'https://other.example')).status, 403);
+  assert.equal((await send({ token, path: '//other.example/' })).status, 400);
+  const response = await send({ token, path: '/?range=today' });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('access-control-allow-origin'), 'null');
+  const filtered = await response.text();
+  assert.match(filtered, /选择时间范围">当天/);
+  assert.doesNotMatch(filtered, /<h1>Prompt 日记<\/h1>/);
+}));
+
+
+test('time selection replaces content without navigating and preserves sidebar state', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const events = {}, menu = { open: true, contains: () => true };
+  const oldGroups = [{ open: true }, { open: false }], newGroups = [{ open: false }, { open: true }];
+  const oldSidebar = { scrollTop: 42, querySelectorAll: () => oldGroups, replaceWith: value => { assert.equal(value, newSidebar); } };
+  const newSidebar = { scrollTop: 0, querySelectorAll: () => newGroups };
+  const newMain = {}, oldMain = { querySelector: () => null, replaceWith: value => { assert.equal(value, newMain); } };
+  const document = { body: { dataset: { token: 'secret' } }, querySelector: key => ({ '.range-menu': menu, '.sidebar': oldSidebar, '.main': oldMain })[key], addEventListener: (name, fn) => { events[name] = fn; } };
+  const parent = { postMessage: () => {} }, window = { parent, addEventListener: () => {} };
+  let navigated = false, request;
+  const location = { pathname: '/', search: '', assign: () => { navigated = true; } };
+  const history = { pushState: (_state, _title, path) => { assert.equal(path, '/?range=today'); } };
+  const page = { querySelector: key => ({ '.sidebar': newSidebar, '.main': newMain })[key] };
+  const fakeFetch = async (_url, options) => { request = JSON.parse(options.body); return { ok: true, text: async () => 'html' }; };
+  class DOMParser { parseFromString() { return page; } }
+  runInNewContext(script, { window, document, location, history, fetch: fakeFetch, DOMParser, URL, setTimeout, clearTimeout });
+  let prevented = false;
+  const option = { href: 'http://127.0.0.1:3479/?range=today' };
+  const target = { closest: selector => selector === '.range-option, .local-filter' ? option : null };
+  await events.click({ target, button: 0, preventDefault: () => { prevented = true; } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prevented, true);
+  assert.equal(navigated, false);
+  assert.equal(request.path, '/?range=today');
+  assert.equal(newSidebar.scrollTop, 42);
+  assert.deepEqual(newGroups.map(group => group.open), [true, false]);
+}));
+
+
+test('searches prompt text and sorts before pagination while retaining filters', async () => withServer(async (directory, url) => {
+  const records = Array.from({ length: 35 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), time: new Date(2026, 0, 1, 12, i).toISOString(), text: `Needle ${String(i).padStart(2, '0')}`, cwd: '/work', agent: 'codex', images: [] }));
+  records.push({ id: 'f'.repeat(64), time: new Date(2026, 0, 1, 13).toISOString(), text: '别的内容', cwd: '/work', agent: 'codex', images: [] });
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  const asc = await (await fetch(`${url}/?q=NEEDLE&sort=asc`)).text();
+  assert.match(asc, /35 条记录/);
+  assert.match(asc, /Needle 00/);
+  assert.doesNotMatch(asc, /Needle 34/);
+  assert.doesNotMatch(asc, /别的内容/);
+  assert.match(asc, /时间正序：最早在前/);
+  const second = await (await fetch(`${url}/?q=needle&sort=asc&page=2`)).text();
+  assert.match(second, /Needle 34/);
+  assert.doesNotMatch(second, /Needle 00/);
+  const desc = await (await fetch(`${url}/?q=needle`)).text();
+  assert.ok(desc.indexOf('Needle 34') < desc.indexOf('Needle 33'));
+  assert.match(desc, /时间倒序：最新在前/);
+  assert.doesNotMatch(desc, /刷新历史/);
+}));
+
+
+test('navigates only the selected card images with buttons, keys and swipes', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const events = {}, preview = { src: '' }, prev = {}, next = {}, count = {};
+  const elements = { img: preview, '.preview-prev': prev, '.preview-next': next, '.preview-count': count };
+  const dialog = { open: false, querySelector: key => elements[key], showModal() { this.open = true; }, close() { this.open = false; } };
+  const document = { body: { dataset: {} }, querySelector: key => key === '.image-dialog' ? dialog : null, addEventListener: (name, fn) => { events[name] = fn; } };
+  const parent = { postMessage: () => {} }, window = { parent, addEventListener: () => {} };
+  runInNewContext(script, { document, window, location: { pathname: '/', search: '' }, setTimeout, clearTimeout });
+  const group = { querySelectorAll: () => buttons };
+  const buttons = ['first', 'second'].map(src => ({ dataset: {}, classList: { contains: name => name === 'image-preview' }, querySelector: () => ({ src }), closest: () => group }));
+  const click = button => events.click({ target: { closest: selector => selector === 'button' ? button : null } });
+  await click(buttons[1]);
+  assert.equal(dialog.open, true);
+  assert.equal(preview.src, 'second');
+  assert.equal(count.textContent, '2 / 2');
+  assert.equal(next.disabled, true);
+  assert.equal(prev.hidden, false);
+  let prevented = false;
+  events.keydown({ key: 'ArrowLeft', preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(preview.src, 'first');
+  assert.equal(prev.disabled, true);
+  await click({ dataset: {}, classList: { contains: name => name === 'preview-next' } });
+  assert.equal(preview.src, 'second');
+  const target = { closest: () => dialog };
+  events.touchstart({ target, touches: [{ clientX: 10, clientY: 10 }] });
+  events.touchend({ target, changedTouches: [{ clientX: 90, clientY: 12 }] });
+  assert.equal(preview.src, 'first');
+  await events.click({ target: dialog });
+  assert.equal(dialog.open, false);
+}));
+
+test('renders T3 image metadata as attachment labels while preserving copied text and code', async () => withServer(async (directory, url) => {
+  const text = '请看 [Image: image.png; ref=image_123] 这里\n\n<t3_context version="1">\n<context kind="image" id="image_123">\nname: image.png\nmimeType: image/png\nsizeBytes: 9717\nattachmentId: example-id\n</context>\n</t3_context>\n\n```text\n[Image: code.png; ref=code_123]\n```\n\n<t3_context version="1">\n<context kind="other" id="other">用户内容</context>\n</t3_context>';
+  const record = { id: 'a'.repeat(64), time: new Date().toISOString(), text, cwd: '/work', agent: 'codex', images: [] };
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [record] }));
+  const html = await (await fetch(url)).text();
+  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.match(prompt, /class="attachment-label"[^>]*图片附件：image\.png/);
+  assert.doesNotMatch(prompt, /ref=image_123|attachmentId: example-id/);
+  assert.match(prompt, /\[Image: code\.png; ref=code_123\]/);
+  assert.match(prompt, /&lt;context kind=&quot;other&quot;/);
+  assert.match(html, /data-copy="[^\"]*\[Image: image\.png; ref=image_123\]/);
+  assert.match(html, /attachmentId: example-id/);
 }));

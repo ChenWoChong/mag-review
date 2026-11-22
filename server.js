@@ -24,8 +24,10 @@ export function createDiaryServer(options = {}) {
     };
     const send = (status, content) => { res.writeHead(status, headers); res.end(content); };
     if (!/^127\.0\.0\.1(?::\d+)?$/.test(host)) return send(403, 'Forbidden');
-    const url = new URL(req.url, 'http://127.0.0.1');
-    if (url.pathname === '/action') {
+    let url = new URL(req.url, 'http://127.0.0.1');
+    let filteredRequest = false;
+    if (url.pathname === '/action' || url.pathname === '/filter') {
+      const filtering = url.pathname === '/filter';
       if (req.method !== 'POST') return send(405, 'Method not allowed');
       // The page is in Magpie's sandboxed iframe, whose origin is null. A
       // per-process token keeps unrelated sites from changing local markers.
@@ -42,16 +44,23 @@ export function createDiaryServer(options = {}) {
         const supplied = Buffer.from(typeof action.token === 'string' ? action.token : '');
         const expected = Buffer.from(token);
         if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(403, cors); return res.end('Forbidden'); }
-        if (action.type === 'refresh') {
+        if (filtering) {
+          if (typeof action.path !== 'string' || !action.path.startsWith('/?') && action.path !== '/') { res.writeHead(400, cors); return res.end('Invalid path'); }
+          filteredRequest = true;
+          url = new URL(action.path, 'http://127.0.0.1');
+          if (url.pathname !== '/' || url.origin !== 'http://127.0.0.1') { res.writeHead(400, cors); return res.end('Invalid path'); }
+        } else if (action.type === 'refresh') {
           if (!syncing) {
             syncing = true;
             importHistory(options).catch(() => {}).finally(() => { syncing = false; });
           }
         } else await updateAnnotations(directory, action);
-        res.writeHead(200, cors); return res.end('ok');
+        if (!filtering) { res.writeHead(200, cors); return res.end('ok'); }
+        headers['Access-Control-Allow-Origin'] = 'null';
+        headers.Vary = 'Origin';
       } catch { res.writeHead(400, cors); return res.end('Invalid action'); }
     }
-    if (req.method !== 'GET') return send(405, 'Method not allowed');
+    if (req.method !== 'GET' && !filteredRequest) return send(405, 'Method not allowed');
     if (url.pathname !== '/') return send(404, 'Not found');
     const date = url.searchParams.get('date');
     if (date !== null && !datePattern.test(date)) return send(400, 'Invalid date');

@@ -430,3 +430,68 @@ test('removes trailing blank lines left by hidden T3 image metadata', async () =
   assert.match(html, /attachmentId: attachment-123/);
   assert.match(html, /data-copy="第一行\n\n第二行/);
 }));
+
+test('incremental loading uses a stable cursor when new records arrive', async () => withServer(async (directory, url) => {
+  const records = Array.from({ length: 45 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), time: new Date(2026, 0, 1, 12, i).toISOString(), text: `记录${String(i).padStart(2, '0')}`, cwd: '/work', agent: 'codex', images: [] }));
+  const history = { version: 1, sessions: 1, read: 1, records };
+  await writeFile(join(directory, '.history.json'), JSON.stringify(history));
+  const first = await (await fetch(url)).text();
+  const firstItems = [...first.matchAll(/data-copy="(记录\d+)"/g)].map(m => m[1]);
+  assert.equal(firstItems.length, 30);
+  assert.doesNotMatch(first, /上一页|下一页/);
+  const next = /class="load-more-sentinel" data-next="([^"]+)"/.exec(first)[1].replaceAll('&amp;', '&');
+  const token = /<body data-token="([a-f0-9]+)"/.exec(first)[1];
+  history.records.push({ id: 'f'.repeat(64), time: new Date(2026, 0, 1, 12, 59).toISOString(), text: '新插入记录', cwd: '/work', agent: 'codex', images: [] });
+  await writeFile(join(directory, '.history.json'), JSON.stringify(history));
+  const response = await fetch(`${url}/filter`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ token, path: next }) });
+  const second = await response.text();
+  const secondItems = [...second.matchAll(/data-copy="(记录\d+)"/g)].map(m => m[1]);
+  assert.equal(secondItems.length, 15);
+  assert.equal(new Set([...firstItems, ...secondItems]).size, 45);
+  assert.doesNotMatch(second, /class="load-more-sentinel"/);
+  assert.doesNotMatch(second, /新插入记录/);
+  assert.match(await (await fetch(`${url}/?after=${'e'.repeat(64)}`)).text(), /记录已变化，请刷新页面后重试/);
+}));
+
+test('incremental loading merges the same date and appends later dates', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const appended = [], inserted = [], nextRows = [{ id: 'r1' }, { id: 'r2' }];
+  const last = { dataset: { day: '2026-01-02' }, appendChild: row => appended.push(row) };
+  const same = { dataset: { day: '2026-01-02' }, querySelectorAll: () => nextRows };
+  const other = { dataset: { day: '2026-01-01' }, querySelectorAll: () => [] };
+  const status = {}, retry = {}, sentinel = { dataset: { next: '/?after=123' }, isConnected: true, querySelector: key => key === 'span' ? status : retry, before: node => inserted.push(node), remove() { this.isConnected = false; } };
+  const main = { querySelectorAll: () => [last], querySelector: () => null };
+  const nextMain = { querySelectorAll: () => [same, other], querySelector: () => null };
+  const document = { body: { dataset: { token: 'secret' } }, querySelector: key => key === '.main' ? main : null, addEventListener() {} };
+  const parent = { postMessage() {} }, window = { parent, addEventListener() {} };
+  class DOMParser { parseFromString() { return { querySelector: () => nextMain }; } }
+  const fakeFetch = async () => ({ ok: true, text: async () => 'html' });
+  await runInNewContext(script + '\nloadMore(sentinel)', { document, window, sentinel, DOMParser, fetch: fakeFetch, location: { pathname: '/', search: '' }, setTimeout, clearTimeout });
+  assert.deepEqual(appended, nextRows);
+  assert.deepEqual(inserted, [other]);
+  assert.equal(sentinel.isConnected, false);
+}));
+
+test('highlights all literal search matches without changing copy text or HTML safety', async () => withServer(async (directory, url) => {
+  const records = [
+    { id: 'a'.repeat(64), time: new Date().toISOString(), text: '提交推送，推送完成\n推送', cwd: '/work', agent: 'codex', images: [] },
+    { id: 'b'.repeat(64), time: new Date().toISOString(), text: 'A.b 和 a.B 以及 axb', cwd: '/work', agent: 'codex', images: [] },
+    { id: 'c'.repeat(64), time: new Date().toISOString(), text: '示例 <script>alert(1)</script>', cwd: '/work', agent: 'codex', images: [] },
+  ];
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  const search = async text => (await (await fetch(`${url}/?q=${encodeURIComponent(text)}`)).text());
+  const chinese = await search('推送');
+  const body = /<div class="prompt">([\s\S]*?)<\/div>/.exec(chinese)[1];
+  assert.equal((body.match(/<mark>推送<\/mark>/g) || []).length, 3);
+  assert.match(chinese, /data-copy="提交推送，推送完成\n推送"/);
+  const literal = await search('a.b');
+  const literalBody = /<div class="prompt">([\s\S]*?)<\/div>/.exec(literal)[1];
+  assert.match(literalBody, /<mark>A\.b<\/mark> 和 <mark>a\.B<\/mark> 以及 axb/);
+  const unsafe = await search('<script>');
+  assert.match(unsafe, /<mark>&lt;script&gt;<\/mark>/);
+  assert.doesNotMatch(unsafe, /<script>alert/);
+  const normal = await (await fetch(url)).text();
+  const normalPrompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(normal)[1];
+  assert.doesNotMatch(normalPrompt, /<mark>/);
+}));

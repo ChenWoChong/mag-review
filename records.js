@@ -1,6 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, dirname, isAbsolute, normalize } from 'node:path';
 import { isAutomaticPrompt, parseEntries, splitAttachments } from './diary.js';
 import { readHistory } from './history-import.js';
 import { hashText } from './identity.js';
@@ -29,6 +29,30 @@ async function sessionsFromUsage(path) {
     sessions.get(key).add(hashText(row.session));
   }
   return sessions;
+}
+
+// Resolve only directories that still exist. Historical paths remain distinct and
+// are never discarded merely because the original checkout has disappeared.
+async function projectFor(cwd) {
+  if (!cwd || cwd === '未知') return { project: '未知项目', projectId: 'unknown:', projectKind: 'unknown', projectPath: '' };
+  const original = normalize(cwd);
+  let path;
+  try {
+    path = await realpath(original);
+    if (!(await stat(path)).isDirectory()) throw new Error('not a directory');
+  } catch {
+    return { project: basename(original), projectId: `path:${original}`, projectKind: 'unconfirmed', projectPath: original };
+  }
+  if (isAbsolute(path)) {
+    for (let dir = path; ; dir = dirname(dir)) {
+      try {
+        await stat(join(dir, '.git'));
+        return { project: basename(dir), projectId: `path:${dir}`, projectKind: 'git', projectPath: dir };
+      } catch {}
+      if (dirname(dir) === dir) break;
+    }
+  }
+  return { project: basename(path), projectId: `path:${path}`, projectKind: 'directory', projectPath: path };
 }
 
 export async function loadRecords(directory, options = {}) {
@@ -70,8 +94,11 @@ export async function loadRecords(directory, options = {}) {
     }
   }
   const records = [...local, ...imported];
+  const projects = new Map();
   for (const entry of records) {
-    entry.project = entry.cwd && entry.cwd !== '未知' ? basename(entry.cwd.replace(/\/$/, '')) : '未知项目';
+    const cwd = entry.cwd || '';
+    if (!projects.has(cwd)) projects.set(cwd, projectFor(cwd));
+    Object.assign(entry, await projects.get(cwd));
     entry.hasImage = entry.images.length > 0 || splitAttachments(entry.text).paths.length > 0;
   }
   records.sort((a, b) => `${b.day} ${b.time}`.localeCompare(`${a.day} ${a.time}`));

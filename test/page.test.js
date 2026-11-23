@@ -547,3 +547,20 @@ test('all view clears selected calendar date and preserves other filters', async
   const cleared = await (await fetch(target)).text();
   assert.doesNotMatch(cleared, /class="heat level-\d selected"/);
 }));
+
+test('project facets follow other filters, retain selected zero counts, and distinguish paths', async () => withServer(async (directory, url) => {
+  const records = [
+    { id: '1'.repeat(64), time: '2026-01-02T10:00:00', text: 'needle', cwd: '/old/one/shared', agent: 'codex', images: [] },
+    { id: '2'.repeat(64), time: '2026-01-01T10:00:00', text: 'other', cwd: '/old/two/shared', agent: 'codex', images: [] },
+  ];
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records }));
+  const page = await (await fetch(`${url}/?q=needle&project=${encodeURIComponent('path:/old/two/shared')}`)).text();
+  const group = page.split('id="project-filters"')[1].split('id="agent-filters"')[0];
+  assert.match(group, /当前匹配项目数 \/ 全部历史目录数">1 \/ 2/);
+  assert.match(group, /\/old\/one/);
+  assert.match(group, /\/old\/two/);
+  assert.match(group, /project-item local-filter active/);
+  assert.match(group, /project-count">0</);
+  assert.match(group, /project-count">1</);
+  assert.match(page, /这里还没有记录/);
+}));

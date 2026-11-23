@@ -201,15 +201,21 @@ export async function renderPage({ records, history, data, directory, params, no
   for (const record of visible) {
     const id = record.projectId || record.project;
     if (!id) continue;
-    const project = projectMap.get(id) || { id, name: record.project, path: record.projectPath || record.cwd || '', kind: record.projectKind || 'unconfirmed', count: 0, latest: '' };
-    project.latest = [project.latest, `${record.day} ${record.time}`].sort().at(-1);
+    const project = projectMap.get(id) || { id, name: record.project, path: record.projectPath || record.cwd || '', kind: record.projectKind || 'unconfirmed', count: 0, latest: '', latestMatch: '' };
+    const timestamp = `${record.day} ${record.time}`;
+    if (timestamp > project.latest) project.latest = timestamp;
     projectMap.set(id, project);
   }
   for (const record of matchingProjects) {
     const project = projectMap.get(record.projectId || record.project);
-    if (project) project.count++;
+    if (!project) continue;
+    project.count++;
+    const timestamp = `${record.day} ${record.time}`;
+    if (timestamp > project.latestMatch) project.latestMatch = timestamp;
   }
-  const projects = [...projectMap.values()].sort((a, b) => b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh-CN'));
+  const projects = [...projectMap.values()].sort((a, b) =>
+    b.latestMatch.localeCompare(a.latestMatch) || b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh-CN')
+  );
   const currentProject = params.get('project');
   const isCurrentProject = project => currentProject === project.id || currentProject === project.name;
   const nameCounts = new Map();

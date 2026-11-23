@@ -548,6 +548,27 @@ test('all view clears selected calendar date and preserves other filters', async
   assert.doesNotMatch(cleared, /class="heat level-\d selected"/);
 }));
 
+test('orders collapsed and expanded projects by their latest matching record', async () => withServer(async (directory, url) => {
+  const records = [
+    ['2026-01-03T12:00:00', 'other', 'older-match'],
+    ['2026-01-03T11:00:00', 'other', 'no-match'],
+    ['2026-01-03T10:00:00', 'needle', 'newer-match'],
+    ...Array.from({ length: 5 }, (_, i) => [`2026-01-03T09:0${i}:00`, 'needle', `project-${i}`]),
+    ['2026-01-02T23:00:00', 'needle', 'older-match'],
+  ].map(([time, text, project], i) => ({
+    id: (i + 1).toString(16).repeat(64), time, text, cwd: `/work/${project}`, agent: 'codex',
+  }));
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records }));
+  const projectNames = html => [...html.matchAll(/class="project-name">([^<]+)/g)].map(match => match[1]);
+  const all = await (await fetch(url)).text();
+  assert.deepEqual(projectNames(all).slice(0, 3), ['older-match', 'no-match', 'newer-match']);
+
+  const filtered = await (await fetch(`${url}/?q=needle&sort=asc`)).text();
+  const [initial, extra] = filtered.split('<details class="project-more">');
+  assert.deepEqual(projectNames(initial), ['newer-match', 'project-4', 'project-3', 'project-2', 'project-1', 'project-0']);
+  assert.deepEqual(projectNames(extra), ['older-match', 'no-match']);
+}));
+
 test('project facets follow other filters, retain selected zero counts, and distinguish paths', async () => withServer(async (directory, url) => {
   const records = [
     { id: '1'.repeat(64), time: '2026-01-02T10:00:00', text: 'needle', cwd: '/old/one/shared', agent: 'codex', images: [] },

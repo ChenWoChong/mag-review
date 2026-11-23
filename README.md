@@ -1,6 +1,12 @@
 # Magpie Prompt Diary
 
-一个 Magpie 请求钩子：把网关观察到的用户文本按天保存为本地 Markdown，适用于经过 Magpie 网关的 Agent，优先面向 Codex、Pi 和 Claude Code。插件不会修改模型请求，也不会调用模型生成摘要。
+一个 Magpie 请求钩子：把网关观察到的用户文本按天保存为本地 Markdown，适用于经过 Magpie 网关的 Agent，优先面向 Codex、Pi 和 Claude Code。采集过程不会修改模型请求或调用模型；用户手动生成复盘时会调用所选模型。
+
+面向通过 Magpie 使用多个 Agent 的个人开发者：在一个页面查找、回顾和整理 Prompt，并按需生成复盘。使用本插件需要 Magpie；历史导入优先支持 Codex、Pi 和 Claude Code。
+
+**数据提示：**记录默认以明文保存在本机，可能包含敏感信息。手动生成复盘时，所选范围内的 Prompt 文本会发送给所选模型，模型可能由远端服务提供。插件不能保证收录所有历史输入。
+
+产品定位、功能边界与后续方向见 [产品文档](docs/product.md)。反馈问题或参与开发请参阅 [贡献指南](CONTRIBUTING.md)，安全问题请参阅 [安全策略](SECURITY.md)。项目由个人维护，响应时间取决于维护者的空闲时间。
 
 ## 安装
 
@@ -13,7 +19,7 @@ magpie plugin add .
 magpie plugin list
 ```
 
-列表中应显示 `async gateway hook onRequest`。在使用对应 Agent 前，确保它的模型请求经过 Magpie 网关；例如，Magpie 的 switch-only 模式会绕过网关，无法记录。发出一条测试消息后，查看本地日期对应的文件：
+列表中应显示 `async gateway hook onRequest`。在使用对应 Agent 前，确保它的模型请求经过 Magpie 网关；例如，Magpie 的 switch-only 模式会绕过网关，无法记录。打开 Magpie，确认插件已启用，并在 Agent 中发送一条不含敏感信息的测试 Prompt。随后查看本地日期对应的文件：
 
 ```sh
 ls ~/.local/share/magpie-prompt-diary
@@ -23,7 +29,7 @@ Magpie 窗口侧边栏的「插件」分组中会出现「Prompt 日记」页面
 
 页面左侧的活动日历每次显示一个自然月，按本机日期统计**已收录**的记录；点击方块可查看当天，左右箭头切换月份。灰色只表示当前没有收录，不代表当天没有使用 Agent。可按时间范围、「全部」「有图片」「已收藏」以及项目、Agent 和标签筛选。
 
-卡片上的星标用于收藏，更多操作可添加标签或隐藏记录；在「已隐藏」中可以恢复。标签列表里的星标可以置顶标签。通过卡片的「保存为模板」可编辑名称与文本，并将项目名等替换为占位符；之后在「Prompt 模板」中复制或继续编辑。收藏、标签、隐藏状态和模板保存在日志目录的 `.annotations.json`，不修改 Agent 的原始会话。卡片底部会标注记录来自原生会话还是网关。
+卡片的更多操作可收藏、添加标签或隐藏记录；当前侧边栏尚未提供查看和恢复已隐藏记录的入口。标签列表里的星标可以置顶标签。通过卡片的「保存为模板」可编辑名称与文本，并将项目名等替换为占位符；之后在「Prompt 模板」中复制或继续编辑。收藏、标签、隐藏状态和模板保存在日志目录的 `.annotations.json`，不修改 Agent 的原始会话。卡片底部会标注记录来自原生会话还是网关。
 
 插件启动时会在后台同步 Magpie 已索引且允许读取的 Codex、Pi 和 Claude 原生会话；重新启用插件可再次同步。历史记录保存在日志目录的 `.history.json`，与实时记录分开保存，页面会合并显示，不会删除原有 Markdown。首次同步可能需要一些时间。
 
@@ -71,3 +77,7 @@ npm test
 测试使用 Node.js 20 及以上，不依赖网络或真实账号。测试数据模拟 Responses 和 Messages 请求；要确认具体 Agent 版本的行为，仍需通过已连接 Magpie 的真实 Agent 做端到端验证。
 
 也可运行 `npm run verify-history`，对照 Magpie 本地搜索索引中的原生会话和当前日记记录。脚本使用 `sqlite3` 和 Magpie CLI，只输出计数；长会话可能被 Magpie 的 transcript 接口截断，索引本身也可能尚未包含所有会话。该命令不导入历史记录。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。

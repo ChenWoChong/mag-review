@@ -1,107 +1,90 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { onRequest } from '../prompt.hooks.js';
+import { loadRecords } from '../records.js';
+import { readSubmissions, writeSubmissions } from '../submissions.js';
+import { readT3Submissions } from '../t3-submissions.js';
 
-async function withDirectory(run) {
-  const directory = await mkdtemp(join(tmpdir(), 'magpie-prompt-test-'));
-  try { await run(directory); } finally { await rm(directory, { recursive: true, force: true }); }
+const schema = `
+CREATE TABLE orchestration_v2_projection_messages(message_id PRIMARY KEY, thread_id, run_id, role, created_at, payload_json);
+CREATE TABLE orchestration_v2_projection_threads(thread_id PRIMARY KEY, project_id, default_provider, deleted_at, payload_json);
+CREATE TABLE projection_projects(project_id PRIMARY KEY, workspace_root);
+CREATE TABLE orchestration_v2_projection_runs(run_id PRIMARY KEY, thread_id, provider, provider_thread_id, payload_json);
+CREATE TABLE orchestration_v2_projection_provider_threads(provider_thread_id PRIMARY KEY, driver);
+INSERT INTO projection_projects VALUES ('project', '/work/root');
+INSERT INTO orchestration_v2_projection_threads VALUES ('thread', 'project', 'codex', NULL, '{"worktreePath":"/work/tree"}');
+INSERT INTO orchestration_v2_projection_threads VALUES ('deleted', 'project', 'codex', '2026-11-24', '{}');
+INSERT INTO orchestration_v2_projection_provider_threads VALUES ('provider', 'pi');
+INSERT INTO orchestration_v2_projection_runs VALUES ('run', 'thread', 'pi', 'provider', '{"workspacePreparation":{"type":"root"}}');
+`;
+
+const prefix = '[pi-lens automated check — not a user request]';
+const submittedAt = '2026-11-23T07:23:39.207Z';
+
+function insert(messages) {
+  return messages.map(([id, payload, thread = 'thread']) => {
+    const message = JSON.stringify({ createdBy: 'user', creationSource: 'web', ...payload }).replaceAll("'", "''");
+    return `INSERT INTO orchestration_v2_projection_messages VALUES ('${id}', '${thread}', 'run', 'user', '${submittedAt}', '${message}');`;
+  }).join('\n');
 }
 
-async function log(directory) {
-  const files = (await readdir(directory)).filter((file) => file.endsWith('.md'));
-  return files.length ? readFile(join(directory, files[0]), 'utf8') : '';
-}
-
-function context(directory, agent, query, session = 'session-1') {
-  return { origin: 'local', agent, query, session, cwd: '/work/project', options: { directory } };
-}
-
-test('Codex Responses requests record each user turn once, even across tool calls', async () => withDirectory(async (directory) => {
-  const ctx = context(directory, 'codex', '修复问题\n保留原文');
-  const first = { input: [{ role: 'user', content: [{ type: 'input_text', text: ctx.query }] }] };
-  await Promise.all([onRequest(first, ctx), onRequest(first, ctx)]);
-  await onRequest({ input: [...first.input, { type: 'function_call_output', output: 'done' }] }, ctx);
-  await onRequest({ input: [...first.input, { role: 'user', content: '<task-notification>finished</task-notification>' }] }, ctx);
-  const second = '继续';
-  await onRequest({ input: [...first.input, { role: 'assistant', content: '完成' }, { role: 'user', content: second }] }, { ...ctx, query: second });
-  const output = await log(directory);
-  assert.equal((output.match(/<!-- magpie-prompt:/g) || []).length, 2);
-  assert.match(output, /修复问题\n保留原文/);
-  assert.match(output, /继续/);
-  const file = (await readdir(directory)).find((name) => name.endsWith('.md'));
-  assert.equal((await stat(join(directory, file))).mode & 0o777, 0o600);
-}));
-
-test('a tool round changing unrelated user context does not create another prompt', async () => withDirectory(async (directory) => {
-  const ctx = context(directory, 't3code', '请检查代码');
-  const question = { role: 'user', content: ctx.query };
-  await onRequest({ input: [{ role: 'user', content: '项目背景' }, question] }, ctx);
-  await onRequest({ input: [{ role: 'user', content: '更新后的项目背景' }, question, { type: 'function_call_output', output: 'done' }] }, ctx);
-  assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 1);
-}));
-
-test('does not capture a T3 Code title generation request', async () => withDirectory(async (directory) => {
-  const query = 'Generate a title that will help the user recognize this T3 Code thread weeks later.\\nUser message: hello';
-  await onRequest({ input: [{ role: 'user', content: query }] }, context(directory, 't3code', query));
-  assert.equal(await log(directory), '');
-}));
-
-test('Claude and Pi tool results are ignored for deduplication', async () => withDirectory(async (directory) => {
-  for (const agent of ['claude', 'pi']) {
-    const ctx = context(directory, agent, '检查这个项目');
-    const initial = { messages: [{ role: 'user', content: [{ type: 'text', text: ctx.query }] }] };
-    const afterTool = { messages: [...initial.messages, { role: 'assistant', content: [{ type: 'tool_use', id: '1' }] }, { role: 'user', content: [{ type: 'tool_result', content: 'tool output' }] }] };
-    await onRequest(initial, ctx);
-    await onRequest(afterTool, ctx);
-  }
-  assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 2);
-}));
-
-test('the same prompt in a new session or a later turn is preserved', async () => withDirectory(async (directory) => {
-  const ctx = context(directory, 'pi', '再试一次');
-  const user = { role: 'user', content: ctx.query };
-  await onRequest({ messages: [user] }, ctx);
-  await onRequest({ messages: [user] }, { ...ctx, session: 'session-2' });
-  await onRequest({ messages: [user, { role: 'assistant', content: '好的' }, user] }, ctx);
-  assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 3);
-}));
-
-test('skips remote, unknown-origin, subagent and empty requests', async () => withDirectory(async (directory) => {
-  const ctx = context(directory, 'codex', 'private');
-  for (const changes of [{ origin: 'remote' }, { origin: 'gateway-key' }, { origin: '' }, { kind: 'subagent' }, { query: '' }]) {
-    await onRequest({}, { ...ctx, ...changes });
-  }
-  assert.equal(await log(directory), '');
-}));
-
-test('uses a longer Markdown fence when prompt contains code fences', async () => withDirectory(async (directory) => {
-  const prompt = '```js\nhello()\n```';
-  await onRequest({ messages: [{ role: 'user', content: prompt }] }, context(directory, 'pi', prompt));
-  assert.match(await log(directory), /````text\n```js\nhello\(\)\n```\n````/);
-}));
-
-test('uses a stable native message ID across retries but keeps a new identical message', async () => withDirectory(async (directory) => {
-  const { appendFile, writeFile } = await import('node:fs/promises');
-  const file = join(directory, 'session.jsonl');
-  const mk = (id, timestamp) => JSON.stringify({ type: 'response_item', timestamp, payload: { type: 'message', role: 'user', id, content: [{ type: 'input_text', text: '再试一次' }] } }) + '\n';
-  await writeFile(file, mk('msg-one', '2026-11-22T03:00:00Z'));
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records: [], sources: { 'session-1': { agent: 'codex', path: file } } }));
-  const ctx = context(directory, 't3code', '再试一次');
-  await onRequest({ input: [{ role: 'user', content: ctx.query }] }, ctx);
-  await onRequest({ input: [{ role: 'user', content: '变化的上下文' }, { role: 'user', content: ctx.query }] }, ctx);
-  await appendFile(file, mk('msg-two', '2026-11-22T03:01:00Z'));
-  await onRequest({ input: [{ role: 'user', content: ctx.query }, { role: 'user', content: ctx.query }] }, ctx);
-  assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 2);
-}));
-
-test('does not record the plugin’s own review model request', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'magpie-review-hook-'));
+async function withT3(run) {
+  const directory = await mkdtemp(join(tmpdir(), 'prompt-submission-'));
   try {
-    const { onRequest } = await import('../prompt.hooks.js');
-    await onRequest({ user: 'magpie-prompt-diary-review', messages: [{ role: 'user', content: 'internal review input' }] }, { origin: 'local', agent: 'codex', query: 'internal review input', options: { directory } });
-    assert.equal((await readdir(directory)).length, 0);
+    await mkdir(join(directory, 'userdata'));
+    const db = join(directory, 'userdata', 'statev2.sqlite');
+    const sql = text => execFileSync('sqlite3', [db], { input: text });
+    sql(schema);
+    await run(directory, sql);
   } finally { await rm(directory, { recursive: true, force: true }); }
-});
+}
+
+test('accepts T3 submissions by author and message ID, independent of text and provider context', async () => withT3(async (directory, sql) => {
+  const attachment = { id: 'thread-image', name: 'image.png', mimeType: 'image/png' };
+  sql(insert([
+    ['first', { text: '继续', context: { handoff: 'Context handoff (full_thread_summary): prior thread' } }],
+    ['second', { text: '继续', creationSource: 'mobile' }],
+    ['pasted', { text: `${prefix}\n原样引用\n` }],
+    ['image', { text: '', attachments: [attachment, { id: '../outside', mimeType: 'image/png' }] }],
+    ['handoff', { text: 'Context handoff (full_thread_summary): old\n继续', createdBy: 'agent', creationSource: 'provider' }],
+    ['title', { text: '继续', createdBy: 'agent', creationSource: 'server' }],
+    ['notification', { text: prefix, notification: {} }],
+    ['compaction', { text: '总结', idleCompaction: {} }],
+    ['agent', { text: prefix, createdBy: 'agent', creationSource: 'web' }],
+    ['unknown', { text: prefix, creationSource: 'server' }],
+    ['blank', { text: '   ' }],
+    ['deleted-message', { text: 'deleted' }, 'deleted'],
+  ]));
+  const records = await readT3Submissions(directory);
+  assert.deepEqual(records.map(row => row.messageId), ['first', 'image', 'pasted', 'second']);
+  assert.equal(records[0].submittedAt, submittedAt);
+  assert.equal(records[0].cwd, '/work/root');
+  assert.equal(records[0].agent, 'pi');
+  assert.equal(records[0].text, '继续');
+  assert.equal(records[1].text, '');
+  assert.deepEqual(records[1].attachments, [attachment]);
+  assert.equal(records[2].text, `${prefix}\n原样引用\n`);
+  assert.equal(records[3].text, records[0].text);
+  assert.notEqual(records[3].id, records[0].id);
+}));
+
+test('snapshot rebuilds idempotently and keeps identity across provider changes', async () => withT3(async (directory, sql) => {
+  assert.deepEqual(await readT3Submissions(directory), []);
+  sql(insert([['submitted', { text: '继续' }]]));
+  const [before] = await readT3Submissions(directory);
+  await writeSubmissions(directory, [before]);
+  const path = join(directory, '.submissions.json');
+  const bytes = await readFile(path, 'utf8');
+  await writeSubmissions(directory, [...await readT3Submissions(directory), before]);
+  assert.equal(await readFile(path, 'utf8'), bytes);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  sql("UPDATE orchestration_v2_projection_provider_threads SET driver = 'codex';");
+  const [after] = await readT3Submissions(directory);
+  assert.equal(after.id, before.id);
+  await writeSubmissions(directory, [before, after]);
+  assert.deepEqual(await readSubmissions(directory), [after]);
+  assert.equal((await loadRecords(directory))[0].agent, 'codex');
+}));

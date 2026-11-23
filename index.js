@@ -1,5 +1,4 @@
 import { startServer } from './server.js';
-import { importHistory } from './history-import.js';
 
 // A short-lived Magpie CLI host can briefly hold the page port while the app
 // is restarting its plugin host. Keep retrying instead of silently giving up.
@@ -28,11 +27,7 @@ export async function startPageService(options, start = startServer, retryMs = 1
 export default {
   id: 'magpie-prompt-diary',
   server: async (_input, options) => {
-    if (process.env.MAGPIE_PROMPT_IMPORT_CHILD === '1') return {};
     await startPageService(options);
-    importHistory(options).catch((error) => {
-      console.error('[prompt-diary] history import failed:', error?.message || error);
-    });
     return {};
   },
 };

@@ -36,7 +36,7 @@ export function reviewInput(records, data, kind, day) {
   if (Number.isNaN(start.getTime()) || localDate(start) !== day) throw new Error('日期无效');
   if (kind === 'weekly') start.setDate(start.getDate() - 6);
   const from = localDate(start);
-  const selected = records.filter(r => r.day >= from && r.day <= day && !annotate(r, data).hidden).slice().reverse();
+  const selected = records.filter(r => r.day >= from && r.day <= day && r.text.trim() && !annotate(r, data).hidden).slice().reverse();
   let remaining = 180000, truncated = 0;
   const entries = [];
   for (const record of selected) {
@@ -44,7 +44,7 @@ export function reviewInput(records, data, kind, day) {
     const text = record.text.slice(0, Math.min(6000, remaining));
     if (text.length < record.text.length) truncated++;
     remaining -= text.length;
-    const session = record.session ? hashText(record.session) : record.sessionHash || '';
+    const session = record.session ? hashText(JSON.stringify([record.source, record.session])) : '';
     entries.push({ id: `p${entries.length + 1}`, recordId: record.id, day: record.day, time: record.time, project: record.project, agent: record.agent, session, text });
   }
   return { kind, day, from, total: selected.length, truncated, entries };

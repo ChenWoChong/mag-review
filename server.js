@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { directoryFor } from './storage.js';
-import { importHistory } from './history-import.js';
+import { writeSubmissions } from './submissions.js';
+import { readT3Submissions } from './t3-submissions.js';
 import { readAnnotations, updateAnnotations } from './annotations.js';
 import { loadRecords } from './records.js';
 import { renderPage } from './views.js';
@@ -16,10 +16,29 @@ export function createDiaryServer(options = {}, dependencies = {}) {
   const gateway = dependencies.gatewayInfo || gatewayInfo;
   const generate = dependencies.generateReview || generateReview;
   const directory = directoryFor(options);
+  const configuredPath = typeof options.t3DataDirectory === 'string' ? options.t3DataDirectory.trim() : '';
+  const t3DataDirectory = isAbsolute(configuredPath) ? configuredPath : '';
+  const readSource = dependencies.readSource || readT3Submissions;
   const token = randomBytes(32).toString('hex');
+  const lifetime = new AbortController();
   let syncing = false;
+  let syncError = configuredPath && !t3DataDirectory ? '请为 t3DataDirectory 设置绝对路径。' : '';
   let reviewJob = null;
-  return createServer(async (req, res) => {
+  async function refresh() {
+    if (syncing || !t3DataDirectory || lifetime.signal.aborted) return;
+    syncing = true;
+    try {
+      const records = await readSource(t3DataDirectory, { signal: lifetime.signal });
+      if (lifetime.signal.aborted) return;
+      await writeSubmissions(directory, records);
+      syncError = '';
+    } catch {
+      syncError = 'T3 Code 同步失败。请检查数据目录、SQLite 版本和读取权限。';
+    } finally {
+      syncing = false;
+    }
+  }
+  const server = createServer(async (req, res) => {
     const nonce = randomBytes(16).toString('base64');
     const host = req.headers.host || '';
     const headers = {
@@ -55,10 +74,7 @@ export function createDiaryServer(options = {}, dependencies = {}) {
           url = new URL(action.path, 'http://127.0.0.1');
           if (url.pathname !== '/' || url.origin !== 'http://127.0.0.1') { res.writeHead(400, cors); return res.end('Invalid path'); }
         } else if (action.type === 'history-status') {
-          let locked = false;
-          try { await stat(join(directory, '.history-import.lock')); locked = true; }
-          catch (error) { if (error.code !== 'ENOENT') throw error; }
-          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ running: syncing || locked }));
+          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ running: syncing }));
         } else if (action.type === 'review-status') {
           res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify(reviewJob || { state: 'idle' }));
         } else if (action.type === 'review-start') {
@@ -69,7 +85,7 @@ export function createDiaryServer(options = {}, dependencies = {}) {
           reviewJob = { state: 'running', day: action.day, kind: action.kind };
           const job = reviewJob;
           Promise.resolve().then(async () => {
-            const { records } = await loadRecords(directory);
+            const records = await loadRecords(directory);
             const data = await readAnnotations(directory);
             const report = await generate({ records, data, day: action.day, kind: action.kind, model: action.model, gateway: info.origin });
             await saveReview(directory, report);
@@ -81,18 +97,15 @@ export function createDiaryServer(options = {}, dependencies = {}) {
           const item = report?.sections?.templates?.find(candidate => candidate.id === action.id);
           if (!item || !['saved', 'dismissed'].includes(action.value)) { res.writeHead(400, cors); return res.end('无效的候选'); }
           if (action.value === 'saved') {
-            const { records } = await loadRecords(directory);
-            const source = records.find(record => record.id === item.sources[0] || record.aliases.includes(item.sources[0]));
+            const records = await loadRecords(directory);
+            const source = records.find(record => record.id === item.sources[0]);
             if (!source) { res.writeHead(400, cors); return res.end('原始记录已不可用'); }
             await updateAnnotations(directory, { type: 'template-save', id: hashText('review-template:' + item.id), title: item.title.slice(0, 80), text: source.text });
-            await updateAnnotations(directory, { type: 'favorite', ids: [source.id, ...source.aliases], value: true });
+            await updateAnnotations(directory, { type: 'favorite', ids: [source.id], value: true });
           }
           await updateAnnotations(directory, { type: 'feedback', id: item.id, value: action.value });
         } else if (action.type === 'refresh') {
-          if (!syncing) {
-            syncing = true;
-            importHistory(options).catch(() => {}).finally(() => { syncing = false; });
-          }
+          refresh();
         } else await updateAnnotations(directory, action);
         if (!filtering) { res.writeHead(200, cors); return res.end('ok'); }
         headers['Access-Control-Allow-Origin'] = 'null';
@@ -104,16 +117,8 @@ export function createDiaryServer(options = {}, dependencies = {}) {
     const date = url.searchParams.get('date');
     if (date !== null && !datePattern.test(date)) return send(400, 'Invalid date');
     try {
-      const { records, history, files } = await loadRecords(directory);
+      const records = await loadRecords(directory);
       const annotations = await readAnnotations(directory);
-      const dates = new Set([...records.map(r => r.day), ...files.filter(n => /^\d{4}-\d{2}-\d{2}\.md$/.test(n)).map(n => n.slice(0, -3))]);
-      let fallback = '';
-      if (!records.length && dates.size && (!date || dates.has(date))) {
-        const day = date || [...dates].sort().at(-1);
-        fallback = await readFile(join(directory, `${day}.md`), 'utf8');
-      }
-      let syncError = '';
-      if (files.includes('.history-error')) syncError = await readFile(join(directory, '.history-error'), 'utf8');
       let review = null;
       if (url.searchParams.get('view') === 'review') {
         const day = url.searchParams.get('reviewDate') || new Date().toLocaleDateString('en-CA');
@@ -124,9 +129,21 @@ export function createDiaryServer(options = {}, dependencies = {}) {
         catch { scope = null; }
         review = { day, kind, models: info.models, selected: info.selected, report: await readReview(directory, day, kind), job: reviewJob, scope };
       }
-      return send(200, await renderPage({ records, history, data: annotations, directory, params: url.searchParams, nonce, token, running: syncing || files.includes('.history-import.lock'), syncError, fallback, review }));
+      return send(200, await renderPage({ records, data: annotations, t3DataDirectory, params: url.searchParams, nonce, token, running: syncing, syncError, review }));
     } catch { return send(500, '读取记录失败，请检查日志目录的权限。'); }
   });
+  if (t3DataDirectory) {
+    server.once('listening', () => {
+      refresh();
+      const timer = setInterval(refresh, 15000);
+      timer.unref?.();
+      server.once('close', () => {
+        lifetime.abort();
+        clearInterval(timer);
+      });
+    });
+  }
+  return server;
 }
 
 export async function startServer(options = {}) {

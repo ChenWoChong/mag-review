@@ -1,4 +1,4 @@
-import { entryImages, splitAttachments } from './diary.js';
+import { entryImages } from './diary.js';
 import { annotate, localDate } from './records.js';
 import { dirname } from 'node:path';
 
@@ -67,66 +67,25 @@ function heatmap(records, params) {
   return `<div class="heat-head" id="calendar"><span>活动记录</span><div class="month-nav"><a href="${url(params, { month: monthOf(-1), date: '', page: '' })}" aria-label="上个月">‹</a><strong>${year} 年 ${index} 月</strong><a href="${url(params, { month: monthOf(1), date: '', page: '' })}" aria-label="下个月">›</a></div></div><div class="weekdays">${weekdays}</div><div class="heatmap">${cells}</div>`;
 }
 
-// Convert T3's image references for display only; the stored and copied text stays intact.
 function renderPrompt(text, query = '') {
-  const pattern = query ? new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu') : null;
-  const highlight = value => {
-    if (!pattern) return esc(value);
-    let result = '', pos = 0;
-    for (const match of value.matchAll(pattern)) {
-      result += esc(value.slice(pos, match.index)) + `<mark>${esc(match[0])}</mark>`;
-      pos = match.index + match[0].length;
-    }
-    return result + esc(value.slice(pos));
-  };
-  const badge = name => `<span class="attachment-label" aria-label="图片附件：${esc(name)}"><span aria-hidden="true">▧</span> ${highlight(name)}</span>`;
-  const fence = /(^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\2[ \t]*(?=\n|$))/gm;
-  const renderChunk = chunk => {
-    const blockPattern = /^[ \t]*<t3_context version="1">\s*([\s\S]*?)\s*<\/t3_context>[ \t]*(?:\n|$)/gm;
-    const blocks = new Map();
-    for (const match of chunk.matchAll(blockPattern)) {
-      const contexts = [...match[1].matchAll(/<context kind="image" id="([\w-]+)">\s*([\s\S]*?)\s*<\/context>/g)];
-      if (!contexts.length || match[1].replace(/<context kind="image" id="[\w-]+">\s*[\s\S]*?\s*<\/context>/g, '').trim()) continue;
-      const items = [];
-      for (const context of contexts) {
-        const fields = context[2].split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-        if (!fields.every(line => /^(?:name|mimeType|sizeBytes|attachmentId): [^\n]+$/.test(line))) break;
-        const name = fields.find(line => line.startsWith('name: '))?.slice(6);
-        const mime = fields.find(line => line.startsWith('mimeType: '))?.slice(10);
-        if (!name || !mime?.startsWith('image/') || !fields.some(line => line.startsWith('attachmentId: '))) break;
-        items.push({ id: context[1], name });
-      }
-      if (items.length === contexts.length) blocks.set(match.index, { length: match[0].length, items });
-    }
-    const marker = /\[Image: ([^\]\n]*?); ref=([\w-]+)\]/g;
-    const references = new Set([...chunk.matchAll(marker)].map(match => match[2]));
-    const tokens = [];
-    for (const match of chunk.matchAll(marker)) tokens.push({ start: match.index, end: match.index + match[0].length, html: badge(match[1]) });
-    for (const [start, block] of blocks) tokens.push({ start, end: start + block.length, html: block.items.filter(item => !references.has(item.id)).map(item => badge(item.name)).join(' ') });
-    tokens.sort((a, b) => a.start - b.start || b.end - a.end);
-    let result = '', pos = 0;
-    for (const token of tokens) {
-      if (token.start < pos) continue;
-      result += highlight(chunk.slice(pos, token.start)) + token.html;
-      pos = token.end;
-    }
-    return result + highlight(chunk.slice(pos));
-  };
+  if (!query) return esc(text);
+  const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
   let result = '', pos = 0;
-  for (const match of text.matchAll(fence)) {
-    result += renderChunk(text.slice(pos, match.index)) + highlight(match[0]);
+  for (const match of text.matchAll(pattern)) {
+    result += esc(text.slice(pos, match.index)) + `<mark>${esc(match[0])}</mark>`;
     pos = match.index + match[0].length;
   }
-  return (result + renderChunk(text.slice(pos))).trimEnd();
+  return result + esc(text.slice(pos));
 }
 
-async function card(entry, data, directory, query) {
-  const mark = annotate(entry, data), ids = esc([entry.id, ...entry.aliases].join(','));
-  const { images, displayedPaths } = await entryImages(entry, directory);
-  const display = splitAttachments(entry.text, displayedPaths).display;
+async function card(entry, data, t3DataDirectory, query) {
+  const mark = annotate(entry, data), ids = esc(entry.id);
+  const images = await entryImages(entry, t3DataDirectory);
+  const attachments = entry.attachments.map(attachment => `<span class="attachment-label">${esc(attachment.name)}</span>`).join('');
+  const source = entry.source === 't3code' ? 'T3 Code 用户提交' : '原生用户提交';
   const pictures = images.length ? `<div class="pictures" hidden>${images.map(src => `<button type="button" class="image-preview" aria-label="放大查看图片"><img src="${src}" alt="Prompt 附件" loading="lazy"></button>`).join('')}</div>` : '';
   const tags = mark.tags.map(tag => `<span class="tag">${esc(tag)} <button type="button" class="untag" data-ids="${ids}" data-tag="${esc(tag)}" aria-label="移除标签 ${esc(tag)}">×</button></span>`).join('');
-  return `<div class="timeline-row"><time class="timeline-time" datetime="${esc(entry.day)}T${esc(entry.time)}">${esc(entry.time)}</time><article class="card">${display ? `<div class="prompt">${renderPrompt(display, query)}</div>` : ''}${pictures}<div class="tag-editor" hidden><input type="text" maxlength="32" placeholder="输入标签名称" aria-label="标签名称"><button type="button" class="save-tag" data-ids="${ids}">保存</button><button type="button" class="cancel-tag">取消</button></div>${templateEditor(entry.id)}<div class="card-footer" hidden><div class="card-tags"><span class="tag">${esc(entry.agent || '未知 Agent')}</span><span class="tag" title="${esc(entry.cwd || '未知项目')}">${esc(entry.project)}</span>${tags}</div><details class="source"><summary>来源：${esc(entry.source)} · 查看原文和来源</summary><div>工作目录：${esc(entry.cwd || '未知')}</div>${entry.session ? `<div>会话：${esc(entry.session)}</div>` : ''}<pre>${esc(entry.text)}</pre></details></div></article><details class="more timeline-actions"><summary aria-label="更多操作${mark.favorite ? '，已收藏' : ''}" title="${mark.favorite ? '更多操作 · 已收藏' : '更多操作'}"${mark.favorite ? ' class="is-favorite"' : ''}>···</summary><div class="menu"><button class="copy" type="button" data-copy="${esc(entry.text)}">复制原文</button><button class="favorite" type="button" data-ids="${ids}" data-value="${!mark.favorite}">${mark.favorite ? '取消收藏' : '收藏'}</button><button type="button" class="toggle-card-info" aria-expanded="false">显示详情</button><button type="button" class="add-tag" data-ids="${ids}">添加标签</button><button type="button" class="edit-template" data-id="${esc(entry.id)}">保存为模板</button><button type="button" class="hide-record" data-ids="${ids}" data-value="${!mark.hidden}">${mark.hidden ? '恢复显示' : '隐藏此条'}</button></div></details></div>`;
+  return `<div class="timeline-row"><time class="timeline-time" datetime="${esc(entry.day)}T${esc(entry.time)}">${esc(entry.time)}</time><article class="card">${entry.text ? `<div class="prompt">${renderPrompt(entry.text, query)}</div>` : ''}${attachments}${pictures}<div class="tag-editor" hidden><input type="text" maxlength="32" placeholder="输入标签名称" aria-label="标签名称"><button type="button" class="save-tag" data-ids="${ids}">保存</button><button type="button" class="cancel-tag">取消</button></div>${templateEditor(entry.id)}<div class="card-footer" hidden><div class="card-tags"><span class="tag">${esc(entry.agent || '未知 Agent')}</span><span class="tag" title="${esc(entry.cwd || '未知项目')}">${esc(entry.project)}</span>${tags}</div><details class="source"><summary>来源：${esc(source)} · 查看原文和来源</summary><div>工作目录：${esc(entry.cwd || '未知')}</div>${entry.session ? `<div>会话：${esc(entry.session)}</div>` : ''}<pre>${esc(entry.text)}</pre></details></div></article><details class="more timeline-actions"><summary aria-label="更多操作${mark.favorite ? '，已收藏' : ''}" title="${mark.favorite ? '更多操作 · 已收藏' : '更多操作'}"${mark.favorite ? ' class="is-favorite"' : ''}>···</summary><div class="menu">${entry.text.trim() ? `<button class="copy" type="button" data-copy="${esc(entry.text)}">复制原文</button>` : ''}<button class="favorite" type="button" data-ids="${ids}" data-value="${!mark.favorite}">${mark.favorite ? '取消收藏' : '收藏'}</button><button type="button" class="toggle-card-info" aria-expanded="false">显示详情</button><button type="button" class="add-tag" data-ids="${ids}">添加标签</button>${entry.text.trim() ? `<button type="button" class="edit-template" data-id="${esc(entry.id)}">保存为模板</button>` : ''}<button type="button" class="hide-record" data-ids="${ids}" data-value="${!mark.hidden}">${mark.hidden ? '恢复显示' : '隐藏此条'}</button></div></details></div>`;
 }
 
 function templateEditor(id) {
@@ -140,8 +99,7 @@ function templateCard(id, template) {
 function reviewPage(review, records, data) {
   const { day, kind, models, selected, report, job, scope } = review;
   const options = models.map(model => `<option value="${esc(model)}"${model === selected ? ' selected' : ''}>${esc(model)}</option>`).join('');
-  const sources = new Map();
-  for (const record of records) for (const id of [record.id, ...record.aliases]) sources.set(id, record);
+  const sources = new Map(records.map(record => [record.id, record]));
   const labels = { issues: '今日核心问题', corrections: kind === 'weekly' ? '跨日重复提醒与规则建议' : '重复纠偏线索', templates: '值得复用的 Prompt' };
   const evidence = ids => `<details class="review-evidence"><summary>查看原始 Prompt（${ids.length}）</summary>${ids.map(id => {
     const record = sources.get(id);
@@ -174,7 +132,7 @@ function reviewPage(review, records, data) {
   return `<div class="review-page"><header class="review-header"><h2>复盘与沉淀</h2><p>依据已收录的用户 Prompt，总结问题与要求；不判断任务是否完成，也不会自动修改规则文件。</p></header><form class="review-scope" method="get"><input type="hidden" name="view" value="review"><label>日期 <input type="date" name="reviewDate" value="${esc(day)}" required></label><label>范围 <select name="reviewKind"><option value="daily"${kind === 'daily' ? ' selected' : ''}>当天</option><option value="weekly"${kind === 'weekly' ? ' selected' : ''}>近 7 天</option></select></label><button type="submit">查看</button></form><p class="review-meta">${scope ? `生成范围：${esc(scope.from)} 至 ${esc(day)} · ${scope.total} 条可用，将分析 ${scope.included} 条${scope.truncated ? ` · ${scope.truncated} 条未完整纳入` : ''}` : '日期无效'}</p><div class="review-generate" data-running="${job?.state === 'running' ? 'true' : 'false'}"><label>生成模型 <select class="review-model" aria-label="生成模型">${options || '<option value="">无可用模型</option>'}</select></label><button type="button" class="generate-review" data-day="${esc(day)}" data-kind="${esc(kind)}"${!models.length || !scope?.included || job?.state === 'running' ? ' disabled' : ''}>${report ? '重新生成' : '生成复盘'}</button><span class="review-status" role="status">${status}</span><p>点击生成后，所选范围内的 Prompt 文本会发送给所选模型；不包含图片。最多分析 250 条，每条最多 6000 字符，总计最多 180000 字符。</p></div>${report ? `<p class="review-meta">${esc(report.from)} 至 ${esc(report.day)} · 已收录 ${report.total} 条，分析 ${report.included} 条${report.truncated ? ` · ${report.truncated} 条未完整纳入` : ''} · ${esc(report.model)} · ${esc(new Date(report.generatedAt).toLocaleString('zh-CN'))}</p>` : ''}${sections}<div class="review-template-link"><a href="/?view=templates">查看已保存的 Prompt 模板 →</a></div></div>`;
 }
 
-export async function renderPage({ records, history, data, directory, params, nonce, token, running, syncError, fallback, review }) {
+export async function renderPage({ records, data, t3DataDirectory, params, nonce, token, running, syncError, review }) {
   const visible = records.filter(record => !annotate(record, data).hidden);
   const view = params.get('view') || 'all';
   const icon = (path) => `<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
@@ -202,16 +160,14 @@ export async function renderPage({ records, history, data, directory, params, no
     const id = record.projectId || record.project;
     if (!id) continue;
     const project = projectMap.get(id) || { id, name: record.project, path: record.projectPath || record.cwd || '', kind: record.projectKind || 'unconfirmed', count: 0, latest: '', latestMatch: '' };
-    const timestamp = `${record.day} ${record.time}`;
-    if (timestamp > project.latest) project.latest = timestamp;
+    if (record.submittedAt > project.latest) project.latest = record.submittedAt;
     projectMap.set(id, project);
   }
   for (const record of matchingProjects) {
     const project = projectMap.get(record.projectId || record.project);
     if (!project) continue;
     project.count++;
-    const timestamp = `${record.day} ${record.time}`;
-    if (timestamp > project.latestMatch) project.latestMatch = timestamp;
+    if (record.submittedAt > project.latestMatch) project.latestMatch = record.submittedAt;
   }
   const projects = [...projectMap.values()].sort((a, b) =>
     b.latestMatch.localeCompare(a.latestMatch) || b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh-CN')
@@ -241,21 +197,20 @@ export async function renderPage({ records, history, data, directory, params, no
   const tags = [...new Set(visible.flatMap(r => annotate(r, data).tags))].sort((a,b) => a.localeCompare(b, 'zh-CN'));
   const tagLinks = tags.sort((a,b) => Number(data.pinned.includes(b)) - Number(data.pinned.includes(a))).map(tag => `<div class="tag-row"><a class="filter-item${params.get('tag') === tag ? ' active' : ''}" href="${url(params, { tag: params.get('tag') === tag ? '' : tag, date: '', page: '' })}"># ${esc(tag)}</a><button class="pin-tag" data-tag="${esc(tag)}" data-value="${!data.pinned.includes(tag)}" title="${data.pinned.includes(tag) ? '取消置顶' : '置顶标签'}">${data.pinned.includes(tag) ? '★' : '☆'}</button></div>`).join('');
   let list = view === 'templates' ? [] : filtered(records, data, params);
-  list.sort((a, b) => `${b.day} ${b.time}`.localeCompare(`${a.day} ${a.time}`) || b.id.localeCompare(a.id));
   if (params.get('sort') === 'asc') list.reverse();
   if (view === 'random' && list.length) list = [list[Math.floor(Math.random() * list.length)]];
   const templates = view === 'templates' ? Object.entries(data.templates || {}) : [];
   const total = view === 'templates' ? templates.length : list.length, pages = Math.max(1, Math.ceil(total / 30));
   const page = Math.min(pages, Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1));
   const after = params.get('after');
-  const cursorIndex = after ? (view === 'templates' ? templates.findIndex(([id]) => id === after) : list.findIndex(record => record.id === after || record.aliases.includes(after))) : -1;
+  const cursorIndex = after ? (view === 'templates' ? templates.findIndex(([id]) => id === after) : list.findIndex(record => record.id === after)) : -1;
   const cursorMissing = Boolean(after && cursorIndex < 0);
   const start = cursorMissing ? total : after ? cursorIndex + 1 : (page - 1) * 30;
   const pageRecords = list.slice(start, start + 30);
   const pageTemplates = templates.slice(start, start + 30);
   const items = view === 'templates'
     ? pageTemplates.map(([id, template]) => templateCard(id, template))
-    : await Promise.all(pageRecords.map(r => card(r, data, directory, (params.get('q') || '').trim())));
+    : await Promise.all(pageRecords.map(r => card(r, data, t3DataDirectory, (params.get('q') || '').trim())));
   let content = '';
   if (view === 'templates') content = `<div class="cards">${items.join('')}</div>`;
   else {
@@ -268,13 +223,13 @@ export async function renderPage({ records, history, data, directory, params, no
       return `${closing}<section class="timeline-day" data-day="${esc(current)}"><h3 class="timeline-date">${esc(current)}</h3>${item}`;
     }).join('') + (day ? '</section>' : '');
   }
-  const text = items.length ? content : fallback ? `<article class="card"><div class="prompt">${esc(fallback)}</div></article>` : `<div class="empty"><strong>这里还没有记录</strong><p>试试其他日期或筛选条件。</p></div>`;
+  const text = items.length ? content : `<div class="empty"><strong>这里还没有记录</strong><p>试试其他日期或筛选条件。</p></div>`;
   const lastId = view === 'templates' ? pageTemplates.at(-1)?.[0] : pageRecords.at(-1)?.id;
   const pager = cursorMissing ? '<div class="cursor-expired">记录已变化，请刷新页面后重试。</div>' : lastId && start + items.length < total ? `<div class="load-more-sentinel" data-next="${url(params, { after: lastId, page: '' })}" role="status"><span>正在加载更多…</span><button type="button" class="load-retry" hidden>重试</button></div>` : '';
   const filterLabels = [params.get('date'), params.get('agent'), projects.find(isCurrentProject)?.name || params.get('project'), params.get('tag') && `#${params.get('tag')}`].filter(Boolean).map(x => `<span class="filter-chip">${esc(x)}</span>`).join('');
   const dateCount = new Set(visible.map(r => r.day)).size;
   const mainContent = view === 'review' && review ? reviewPage(review, records, data) : `<header class="main-head${view === 'templates' ? '' : ' timeline-head'}"><div><div class="heading-row"><details class="range-menu"><summary aria-label="选择时间范围">${range[1]} <span aria-hidden="true">⌄</span></summary><div class="range-options">${rangeMenu}</div></details><a class="sort-order local-filter" href="${url(params, { sort: params.get('sort') === 'asc' ? '' : 'asc', page: '' })}" aria-label="${params.get('sort') === 'asc' ? '当前时间正序，点击切换为倒序' : '当前时间倒序，点击切换为正序'}" title="${params.get('sort') === 'asc' ? '时间正序：最早在前' : '时间倒序：最新在前'}"><span aria-hidden="true">${params.get('sort') === 'asc' ? '↑' : '↓'}</span></a></div><p>${total} 条记录 ${filterLabels}</p></div><form class="search-form" role="search"><input type="search" name="q" value="${esc(params.get('q') || '')}" placeholder="搜索 Prompt" aria-label="搜索 Prompt" autocomplete="off"><button type="submit" aria-label="搜索">⌕</button></form></header>${text}${pager}`;
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prompt 日记</title><style>${styles}</style></head><body data-token="${esc(token)}"><main class="shell"><aside class="sidebar"><div class="brand"><div class="eyebrow">PROMPT DIARY</div></div><div class="stats"><a href="/" class="stat"><strong>${visible.length}</strong><span>已收录</span></a><a href="#calendar" class="stat"><strong>${dateCount}</strong><span>记录天数</span></a><a href="#project-filters" class="stat project-shortcut"><strong>${projects.length}</strong><span>历史目录</span></a></div>${heatmap(visible, params)}<nav class="navigation" aria-label="记录视图">${navHTML}</nav><div class="review-navigation"><a class="nav-item${view === 'review' ? ' active' : ''}" href="/?view=review">${icons.review}<span>复盘与沉淀</span></a><a class="nav-item${view === 'templates' ? ' active' : ''}" href="/?view=templates">${icons.templates}<span>Prompt 模板</span></a></div>${projectGroup}${groups('Agent','agent')}<details class="group"${params.get('tag') ? ' open' : ''}><summary><span class="group-title">${icons.tag}标签</span><span class="group-count">${tags.length} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${tagLinks || '<span class="hint">在卡片上添加标签</span>'}</div></details></aside><section class="main">${running ? `<div class="history-sync" role="status"><span>正在同步历史记录…</span><button type="button" class="show-history-update" hidden>查看更新</button></div>` : ''}${mainContent}</section></main><button type="button" class="selection-copy" hidden aria-live="polite">复制选中文字</button><dialog class="image-dialog" aria-label="图片预览"><button type="button" class="close-preview" aria-label="关闭图片预览">×</button><button type="button" class="preview-prev" aria-label="上一张图片">‹</button><img alt="放大的 Prompt 附件"><button type="button" class="preview-next" aria-label="下一张图片">›</button><div class="preview-count" aria-live="polite"></div></dialog><script nonce="${nonce}">${client}</script></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prompt 日记</title><style>${styles}</style></head><body data-token="${esc(token)}"><main class="shell"><aside class="sidebar"><div class="brand"><div class="eyebrow">PROMPT DIARY</div></div><div class="stats"><a href="/" class="stat"><strong>${visible.length}</strong><span>已收录</span></a><a href="#calendar" class="stat"><strong>${dateCount}</strong><span>记录天数</span></a><a href="#project-filters" class="stat project-shortcut"><strong>${projects.length}</strong><span>历史目录</span></a></div>${heatmap(visible, params)}<nav class="navigation" aria-label="记录视图">${navHTML}</nav><div class="review-navigation"><a class="nav-item${view === 'review' ? ' active' : ''}" href="/?view=review">${icons.review}<span>复盘与沉淀</span></a><a class="nav-item${view === 'templates' ? ' active' : ''}" href="/?view=templates">${icons.templates}<span>Prompt 模板</span></a></div>${projectGroup}${groups('Agent','agent')}<details class="group"${params.get('tag') ? ' open' : ''}><summary><span class="group-title">${icons.tag}标签</span><span class="group-count">${tags.length} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${tagLinks || '<span class="hint">在卡片上添加标签</span>'}</div></details></aside><section class="main">${syncError ? `<div class="history-sync" role="status">${esc(syncError)}</div>` : ''}${running ? `<div class="history-sync" role="status"><span>正在同步历史记录…</span><button type="button" class="show-history-update" hidden>查看更新</button></div>` : ''}${mainContent}</section></main><button type="button" class="selection-copy" hidden aria-live="polite">复制选中文字</button><dialog class="image-dialog" aria-label="图片预览"><button type="button" class="close-preview" aria-label="关闭图片预览">×</button><button type="button" class="preview-prev" aria-label="上一张图片">‹</button><img alt="放大的 Prompt 附件"><button type="button" class="preview-next" aria-label="下一张图片">›</button><div class="preview-count" aria-live="polite"></div></dialog><script nonce="${nonce}">${client}</script></body></html>`;
 }
 
 const client = `
@@ -338,7 +293,7 @@ document.addEventListener('wheel', event => {
 let filterSequence = 0;
 let currentPath = location.pathname + location.search;
 function watchHistorySync() {
-  const notice = document.querySelector('.history-sync');
+  const notice = document.querySelector('.history-sync button')?.closest('.history-sync');
   if (!notice) return;
   async function check() {
     if (!notice.isConnected) return;

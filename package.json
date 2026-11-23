@@ -3,9 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Record prompts observed by the Magpie gateway in local daily Markdown files.",
+  "description": "Keep a local diary of confirmed user submissions.",
   "magpie": {
-    "hooks": "./prompt.hooks.js",
     "page": {
       "title": "Prompt Diary",
       "titles": {
@@ -17,7 +16,8 @@
   },
   "scripts": {
     "test": "node --test",
-    "verify-history": "node scripts/verify-history.mjs"
+    "verify-history": "node scripts/verify-history.mjs",
+    "export-day": "node scripts/export-day.mjs"
   },
   "engines": {
     "node": ">=20"

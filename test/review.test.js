@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createDiaryServer } from '../server.js';
 import { reviewInput, parseReview, generateReview, readReview, saveReview } from '../review.js';
 import { hashText } from '../identity.js';
+import { writeRecords } from './fixtures.mjs';
 
 const empty = { entries: {}, pinned: [], templates: {}, feedback: {} };
-const record = (id, day, session, text = '测试内容') => ({ id: id.repeat(64), day, time: '12:00:00', project: 'project', agent: 'codex', session, text, aliases: [], images: [] });
+const record = (id, day, session, text = '测试内容') => ({ id: id.repeat(64), day, time: '12:00:00', project: 'project', agent: 'codex', session, text });
 
 test('review input excludes hidden records and limits rather than discards source data', () => {
   const a = record('a', '2026-11-21', 'session-a', 'a'.repeat(7000));
@@ -61,7 +62,7 @@ test('generation uses only authorized input, persists evidence and retains old o
 test('review endpoint generates, renders evidence and saves original template with feedback', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'review-server-'));
   const id = 'a'.repeat(64), day = '2026-11-22';
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [{ id, time: new Date(2026, 10, 22, 12).toISOString(), text: '原始模板内容', cwd: '/tmp/project', agent: 'codex', session: 'one' }] }));
+  await writeRecords(directory, [{ id, time: new Date(2026, 10, 22, 12).toISOString(), text: '原始模板内容', cwd: '/tmp/project', agent: 'codex', session: 'one' }]);
   const gatewayInfo = async () => ({ origin: 'http://127.0.0.1:1', models: ['test/model'], selected: 'test/model' });
   const generate = async ({ records, kind }) => ({ version: 1, kind, day, from: day, model: 'test/model', generatedAt: new Date().toISOString(), total: 1, included: 1, truncated: 0, sections: { issues: [{ id: 'b'.repeat(64), title: '问题', detail: '分析', sources: [records[0].id] }], corrections: [], templates: [{ id: 'c'.repeat(64), title: '模板', detail: '推荐', sources: [records[0].id] }] } });
   const server = createDiaryServer({ directory }, { gatewayInfo, generateReview: generate });

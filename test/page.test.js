@@ -1,15 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get } from 'node:http';
 import { runInNewContext } from 'node:vm';
 import { createDiaryServer } from '../server.js';
+import { submission, writeSubmissions } from '../submissions.js';
+import { writeRecords } from './fixtures.mjs';
 
-async function withServer(run) {
+async function withServer(run, options = {}, dependencies = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'magpie-diary-page-'));
-  const server = createDiaryServer({ directory });
+  const server = createDiaryServer({ directory, ...options }, dependencies);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   try { await run(directory, url); } finally {
@@ -18,9 +20,11 @@ async function withServer(run) {
   }
 }
 
-test('shows daily Markdown with date navigation and escapes prompt text', async () => withServer(async (directory, url) => {
-  await writeFile(join(directory, '2026-11-20.md'), 'older');
-  await writeFile(join(directory, '2026-11-21.md'), '<script>alert(1)</script>\n## latest');
+test('shows confirmed submissions by date and escapes prompt text', async () => withServer(async (directory, url) => {
+  await writeRecords(directory, [
+    { id: 'old', time: '2026-11-20T12:00:00', text: 'older' },
+    { id: 'new', time: '2026-11-21T12:00:00', text: '<script>alert(1)</script>\n## latest' },
+  ]);
   const response = await fetch(url);
   const html = await response.text();
   assert.equal(response.status, 200);
@@ -48,40 +52,45 @@ test('empty state and invalid or unavailable dates', async () => withServer(asyn
   assert.equal(status, 403);
 }));
 
-test('renders separate cards and saved images while preserving original copy text', async () => withServer(async (directory, url) => {
-  const { onRequest } = await import('../prompt.hooks.js');
-  const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=';
-  const ctx = { origin: 'local', agent: 'codex', session: 'page-test', cwd: '/tmp', query: '看看图片\n换行', options: { directory } };
-  await onRequest({ input: [{ role: 'user', content: [{ type: 'input_text', text: ctx.query }, { type: 'input_image', image_url: `data:image/png;base64,${image}` }] }] }, ctx);
-  const ctx2 = { ...ctx, query: '没有图片 <hello>' };
-  await onRequest({ input: [{ role: 'user', content: [{ type: 'input_text', text: ctx.query }] }, { role: 'user', content: [{ type: 'input_text', text: ctx2.query }] }] }, ctx2);
-  const response = await fetch(url);
-  const html = await response.text();
-  assert.equal((html.match(/<article class="card">/g) || []).length, 2);
-  assert.match(html, /data-copy="看看图片\n换行"/);
-  assert.match(html, /<div class="pictures" hidden><button type="button" class="image-preview" aria-label="放大查看图片"><img src="data:image\/png;base64,/);
-  assert.doesNotMatch(html, /class="toggle-pictures"/);
-  assert.match(html, /class="toggle-card-info" aria-expanded="false">显示详情/);
-  assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
-  assert.match(html, /没有图片 &lt;hello&gt;/);
-  assert.match(response.headers.get('content-security-policy'), /img-src data:/);
-}));
+test('renders attachment-only submissions and preserves original copy text', async () => {
+  const t3DataDirectory = await mkdtemp(join(tmpdir(), 'diary-attachments-'));
+  try {
+    const root = join(t3DataDirectory, 'userdata', 'attachments');
+    await mkdir(root, { recursive: true });
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=', 'base64');
+    await writeFile(join(root, 'thread-image.png'), bytes);
+    const attachments = [{ id: 'thread-image', name: 'image.png', mimeType: 'image/png' }];
+    const base = { source: 't3code', session: 'thread', submittedAt: new Date().toISOString() };
+    const records = [
+      submission({ ...base, messageId: 'image', text: '', attachments }),
+      submission({ ...base, messageId: 'text', text: '看看图片\n换行 <hello>' }),
+    ];
+    await withServer(async (directory, url) => {
+      await writeSubmissions(directory, records);
+      const response = await fetch(url);
+      const html = await response.text();
+      assert.equal((html.match(/<article class="card">/g) || []).length, 2);
+      assert.match(html, /data-copy="看看图片\n换行 &lt;hello&gt;"/);
+      assert.match(html, /class="attachment-label">image\.png/);
+      assert.match(html, /<div class="pictures" hidden><button type="button" class="image-preview" aria-label="放大查看图片"><img src="data:image\/png;base64,/);
+      assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
+      assert.match(response.headers.get('content-security-policy'), /img-src data:/);
+    }, { t3DataDirectory }, { readSource: async () => records });
+  } finally { await rm(t3DataDirectory, { recursive: true, force: true }); }
+});
 
-test('shows imported dates and merges matching live records without removing them', async () => withServer(async (directory, url) => {
-  const stamp = new Date(2026, 0, 2, 10, 0, 0).toISOString();
-  const nativeEvent = 'f'.repeat(64);
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [{ id: 'b'.repeat(64), nativeEvent, time: stamp, text: '重复内容', cwd: '/work', images: [] }] }));
-  await writeFile(join(directory, '2026-01-02.md'), `<!-- magpie-prompt:${'a'.repeat(64)} -->\n## 10:01:00 · codex · /work\n\n\`\`\`text\n重复内容\n\`\`\`\n<!-- magpie-event:${nativeEvent} -->\n`);
-  const response = await fetch(url);
+test('legacy records stay outside the diary even when the confirmed timeline is empty', async () => withServer(async (directory, url) => {
+  await writeFile(join(directory, '2026-01-02.md'), '网关交接摘要');
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records: [{ text: '原生交接摘要' }] }));
+  const response = await fetch(`${url}/?date=2026-01-02`);
   const html = await response.text();
-  assert.match(html, /2026-01-02/);
-  assert.equal((html.match(/<article class="card">/g) || []).length, 1);
-  assert.match(html, /搜索 Prompt/);
+  assert.match(html, /这里还没有记录/);
+  assert.doesNotMatch(html, /交接摘要/);
 }));
 
 test('filters records and keeps favorites and tags locally with a protected action', async () => withServer(async (directory, url) => {
   const id = 'b'.repeat(64);
-  await writeFile(join(directory, '2026-01-02.md'), `<!-- magpie-prompt:${id} -->\n## 10:00:00 · codex · /work/project-one\n\n\`\`\`text\n第一条\n\`\`\`\n`);
+  await writeRecords(directory, [{ id, time: '2026-01-02T10:00:00', agent: 'codex', cwd: '/work/project-one', text: '第一条' }]);
   const page = await (await fetch(url)).text();
   const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
   const send = (payload, origin = 'null') => fetch(`${url}/action`, { method: 'POST', headers: { origin, 'content-type': 'text/plain' }, body: JSON.stringify({ ...payload, token }) });
@@ -91,7 +100,7 @@ test('filters records and keeps favorites and tags locally with a protected acti
   const favorite = await (await fetch(`${url}/?view=favorites&agent=codex&project=project-one&tag=${encodeURIComponent('代码审查')}`)).text();
   assert.match(favorite, /第一条/);
   assert.match(favorite, /代码审查/);
-  assert.match(favorite, /网关实时记录/);
+  assert.match(favorite, /T3 Code 用户提交/);
   const other = await (await fetch(`${url}/?agent=pi`)).text();
   assert.doesNotMatch(other, /第一条/);
   assert.equal((await send({ type: 'hidden', ids: [id], value: true })).status, 200);
@@ -101,25 +110,22 @@ test('filters records and keeps favorites and tags locally with a protected acti
   assert.match(await (await fetch(url)).text(), /第一条/);
 }));
 
-test('preserves existing favorites when live and historical records merge', async () => withServer(async (directory, url) => {
-  const live = 'c'.repeat(64), imported = 'd'.repeat(64), nativeEvent = 'f'.repeat(64);
-  await writeFile(join(directory, '2026-01-02.md'), `<!-- magpie-prompt:${live} -->\n## 10:01:00 · codex · /work\n\n\`\`\`text\n保留收藏\n\`\`\`\n<!-- magpie-event:${nativeEvent} -->\n`);
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [{ id: imported, nativeEvent, time: new Date(2026, 0, 2, 10, 0, 0).toISOString(), text: '保留收藏', cwd: '/work', agent: 'codex' }] }));
-  await writeFile(join(directory, '.annotations.json'), JSON.stringify({ version: 1, entries: { [live]: { favorite: true, tags: ['重要'], hidden: false } }, pinned: [] }));
+test('keeps favorites when the same submission is synchronized again', async () => withServer(async (directory, url) => {
+  const id = 'c'.repeat(64);
+  const record = { id, time: '2026-01-02T10:00:00', text: '保留收藏', cwd: '/work', agent: 'codex' };
+  await writeRecords(directory, [record]);
+  await writeFile(join(directory, '.annotations.json'), JSON.stringify({ version: 1, entries: { [id]: { favorite: true, tags: ['重要'], hidden: false } }, pinned: [] }));
+  await writeRecords(directory, [record, { ...record, agent: 'pi' }]);
   const page = await (await fetch(`${url}/?view=favorites`)).text();
   assert.match(page, /保留收藏/);
   assert.equal((page.match(/<article class="card">/g) || []).length, 1);
   assert.match(page, /取消收藏/);
   assert.match(page, /重要/);
-  const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
-  const r = await fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type: 'favorite', ids: [live, imported], value: false, token }) });
-  assert.equal(r.status, 200);
-  assert.doesNotMatch(await (await fetch(`${url}/?view=favorites`)).text(), /保留收藏/);
 }));
 
 test('saves and edits a reusable prompt template without changing the original', async () => withServer(async (directory, url) => {
   const id = 'e'.repeat(64);
-  await writeFile(join(directory, '2026-01-02.md'), `<!-- magpie-prompt:${id} -->\n## 10:00:00 · codex · /work/project\n\n\`\`\`text\n检查项目 project\n\`\`\`\n`);
+  await writeRecords(directory, [{ id, time: '2026-01-02T10:00:00', cwd: '/work/project', text: '检查项目 project\n' }]);
   const page = await (await fetch(url)).text();
   const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
   const send = (payload) => fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ ...payload, token }) });
@@ -167,8 +173,8 @@ test('follows Magpie theme updates and ignores other windows', async () => withS
 
 test('time ranges combine with categories and calendar selection clears the range', async () => withServer(async (directory, url) => {
   const atDaysAgo = days => { const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - days); return d; };
-  const records = [0, 6, 35].map((days, i) => ({ id: String(i + 1).repeat(64), time: atDaysAgo(days).toISOString(), text: `范围记录${i}`, cwd: '/work', agent: 'codex', images: [] }));
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  const records = [0, 6, 35].map((days, i) => ({ id: String(i + 1).repeat(64), time: atDaysAgo(days).toISOString(), text: `范围记录${i}`, cwd: '/work', agent: 'codex' }));
+  await writeRecords(directory, records);
   await writeFile(join(directory, '.annotations.json'), JSON.stringify({ version: 1, entries: { [records[0].id]: { favorite: true, tags: [], hidden: false } }, pinned: [] }));
   const today = await (await fetch(`${url}/?range=today`)).text();
   assert.match(today, /范围记录0/);
@@ -194,7 +200,7 @@ test('time ranges combine with categories and calendar selection clears the rang
 }));
 
 
-test('filters without navigation using a protected local request', async () => withServer(async (directory, url) => {
+test('filters without navigation using a protected local request', async () => withServer(async (_directory, url) => {
   const page = await (await fetch(url)).text();
   const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
   const send = (body, origin = 'null') => fetch(`${url}/filter`, { method: 'POST', headers: { origin, 'content-type': 'text/plain' }, body: JSON.stringify(body) });
@@ -241,9 +247,9 @@ test('time selection replaces content without navigating and preserves sidebar s
 
 
 test('searches prompt text and sorts before pagination while retaining filters', async () => withServer(async (directory, url) => {
-  const records = Array.from({ length: 35 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), time: new Date(2026, 0, 1, 12, i).toISOString(), text: `Needle ${String(i).padStart(2, '0')}`, cwd: '/work', agent: 'codex', images: [] }));
-  records.push({ id: 'f'.repeat(64), time: new Date(2026, 0, 1, 13).toISOString(), text: '别的内容', cwd: '/work', agent: 'codex', images: [] });
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  const records = Array.from({ length: 35 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), time: new Date(2026, 0, 1, 12, i).toISOString(), text: `Needle ${String(i).padStart(2, '0')}`, cwd: '/work', agent: 'codex' }));
+  records.push({ id: 'f'.repeat(64), time: new Date(2026, 0, 1, 13).toISOString(), text: '别的内容', cwd: '/work', agent: 'codex' });
+  await writeRecords(directory, records);
   const asc = await (await fetch(`${url}/?q=NEEDLE&sort=asc`)).text();
   assert.match(asc, /35 条记录/);
   assert.match(asc, /Needle 00/);
@@ -293,18 +299,14 @@ test('navigates only the selected card images with buttons, keys and swipes', as
   assert.equal(dialog.open, false);
 }));
 
-test('renders T3 image metadata as attachment labels while preserving copied text and code', async () => withServer(async (directory, url) => {
-  const text = '请看 [Image: image.png; ref=image_123] 这里\n\n<t3_context version="1">\n<context kind="image" id="image_123">\nname: image.png\nmimeType: image/png\nsizeBytes: 9717\nattachmentId: example-id\n</context>\n</t3_context>\n\n```text\n[Image: code.png; ref=code_123]\n```\n\n<t3_context version="1">\n<context kind="other" id="other">用户内容</context>\n</t3_context>';
-  const record = { id: 'a'.repeat(64), time: new Date().toISOString(), text, cwd: '/work', agent: 'codex', images: [] };
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [record] }));
+test('keeps literal T3 context markers in an explicitly submitted prompt', async () => withServer(async (directory, url) => {
+  const text = '<t3_context version="1">\n<context kind="image" id="example">\nname: image.png\nmimeType: image/png\nattachmentId: example-id\n</context>\n</t3_context>';
+  await writeRecords(directory, [{ id: 'a', time: new Date(), text }]);
   const html = await (await fetch(url)).text();
   const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
-  assert.match(prompt, /class="attachment-label"[^>]*图片附件：image\.png/);
-  assert.doesNotMatch(prompt, /ref=image_123|attachmentId: example-id/);
-  assert.match(prompt, /\[Image: code\.png; ref=code_123\]/);
-  assert.match(prompt, /&lt;context kind=&quot;other&quot;/);
-  assert.match(html, /data-copy="[^\"]*\[Image: image\.png; ref=image_123\]/);
-  assert.match(html, /attachmentId: example-id/);
+  assert.match(prompt, /attachmentId: example-id/);
+  assert.match(prompt, /&lt;t3_context version=&quot;1&quot;&gt;/);
+  assert.match(html, /data-copy="&lt;t3_context/);
 }));
 
 test('review date and range form updates within the sandbox', async () => withServer(async (_directory, url) => {
@@ -355,7 +357,7 @@ test('groups timeline cards by day and keeps controls outside collapsed cards', 
     { id: 'b'.repeat(64), time: new Date(2026, 0, 2, 11).toISOString(), text: '第一天上午', cwd: '/work', agent: 'codex' },
     { id: 'c'.repeat(64), time: new Date(2026, 0, 3, 9).toISOString(), text: '第二天', cwd: '/work', agent: 'codex' },
   ];
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  await writeRecords(directory, records);
   const page = await (await fetch(url)).text();
   assert.equal((page.match(/class="timeline-day"/g) || []).length, 2);
   assert.equal((page.match(/class="timeline-row"/g) || []).length, 3);
@@ -418,31 +420,17 @@ test('closes an open card menu on outside click or Escape', async () => withServ
   assert.equal(focused, true);
 }));
 
-test('removes trailing blank lines left by hidden T3 image metadata', async () => withServer(async (directory, url) => {
-  const text = '第一行\n\n第二行 [Image: image.png; ref=image_123]\n\n<t3_context version="1">\n<context kind="image" id="image_123">\nname: image.png\nmimeType: image/png\nsizeBytes: 100\nattachmentId: attachment-123\n</context>\n</t3_context>';
-  const record = { id: 'e'.repeat(64), time: new Date().toISOString(), text, cwd: '/work', agent: 'codex', images: [] };
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [record] }));
-  const html = await (await fetch(url)).text();
-  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
-  assert.match(prompt, /^第一行\n\n第二行/);
-  assert.match(prompt, /image\.png<\/span>$/);
-  assert.doesNotMatch(prompt, /\s+$/);
-  assert.match(html, /attachmentId: attachment-123/);
-  assert.match(html, /data-copy="第一行\n\n第二行/);
-}));
-
 test('incremental loading uses a stable cursor when new records arrive', async () => withServer(async (directory, url) => {
-  const records = Array.from({ length: 45 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), time: new Date(2026, 0, 1, 12, i).toISOString(), text: `记录${String(i).padStart(2, '0')}`, cwd: '/work', agent: 'codex', images: [] }));
-  const history = { version: 1, sessions: 1, read: 1, records };
-  await writeFile(join(directory, '.history.json'), JSON.stringify(history));
+  const records = Array.from({ length: 45 }, (_, i) => ({ id: (i + 1).toString(16).padStart(64, '0'), time: new Date(2026, 0, 1, 12, i).toISOString(), text: `记录${String(i).padStart(2, '0')}`, cwd: '/work', agent: 'codex' }));
+  await writeRecords(directory, records);
   const first = await (await fetch(url)).text();
   const firstItems = [...first.matchAll(/data-copy="(记录\d+)"/g)].map(m => m[1]);
   assert.equal(firstItems.length, 30);
   assert.doesNotMatch(first, /上一页|下一页/);
   const next = /class="load-more-sentinel" data-next="([^"]+)"/.exec(first)[1].replaceAll('&amp;', '&');
   const token = /<body data-token="([a-f0-9]+)"/.exec(first)[1];
-  history.records.push({ id: 'f'.repeat(64), time: new Date(2026, 0, 1, 12, 59).toISOString(), text: '新插入记录', cwd: '/work', agent: 'codex', images: [] });
-  await writeFile(join(directory, '.history.json'), JSON.stringify(history));
+  records.push({ id: 'f'.repeat(64), time: new Date(2026, 0, 1, 12, 59).toISOString(), text: '新插入记录', cwd: '/work', agent: 'codex' });
+  await writeRecords(directory, records);
   const response = await fetch(`${url}/filter`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ token, path: next }) });
   const second = await response.text();
   const secondItems = [...second.matchAll(/data-copy="(记录\d+)"/g)].map(m => m[1]);
@@ -475,11 +463,11 @@ test('incremental loading merges the same date and appends later dates', async (
 
 test('highlights all literal search matches without changing copy text or HTML safety', async () => withServer(async (directory, url) => {
   const records = [
-    { id: 'a'.repeat(64), time: new Date().toISOString(), text: '提交推送，推送完成\n推送', cwd: '/work', agent: 'codex', images: [] },
-    { id: 'b'.repeat(64), time: new Date().toISOString(), text: 'A.b 和 a.B 以及 axb', cwd: '/work', agent: 'codex', images: [] },
-    { id: 'c'.repeat(64), time: new Date().toISOString(), text: '示例 <script>alert(1)</script>', cwd: '/work', agent: 'codex', images: [] },
+    { id: 'a'.repeat(64), time: new Date().toISOString(), text: '提交推送，推送完成\n推送', cwd: '/work', agent: 'codex' },
+    { id: 'b'.repeat(64), time: new Date().toISOString(), text: 'A.b 和 a.B 以及 axb', cwd: '/work', agent: 'codex' },
+    { id: 'c'.repeat(64), time: new Date().toISOString(), text: '示例 <script>alert(1)</script>', cwd: '/work', agent: 'codex' },
   ];
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  await writeRecords(directory, records);
   const search = async text => (await (await fetch(`${url}/?q=${encodeURIComponent(text)}`)).text());
   const chinese = await search('推送');
   const body = /<div class="prompt">([\s\S]*?)<\/div>/.exec(chinese)[1];
@@ -518,23 +506,63 @@ test('open menu stays open inside its area and closes after leaving', async () =
   assert.equal(menu.open, false);
 }));
 
-test('history sync does not reload the page and signals when it finishes', async () => withServer(async (directory, url) => {
-  const { rm } = await import('node:fs/promises');
-  const lock = join(directory, '.history-import.lock');
-  await writeFile(lock, String(process.pid));
-  const page = await (await fetch(url)).text();
-  assert.match(page, /正在同步历史记录/);
-  assert.doesNotMatch(page, /setTimeout\(\(\) => location\.reload\(\), 3000\)/);
-  const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
-  const status = async () => (await fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type: 'history-status', token }) })).json();
-  assert.equal((await status()).running, true);
-  await rm(lock);
-  assert.equal((await status()).running, false);
-}));
+test('submission sync does not reload the page and signals when it finishes', async () => {
+  let finish, reads = 0;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const readSource = () => { reads++; return pending; };
+  await withServer(async (_directory, url) => {
+    const page = await (await fetch(url)).text();
+    assert.match(page, /正在同步历史记录/);
+    assert.doesNotMatch(page, /setTimeout\(\(\) => location\.reload\(\), 3000\)/);
+    const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
+    const send = type => fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type, token }) });
+    assert.equal((await (await send('history-status')).json()).running, true);
+    await send('refresh');
+    assert.equal(reads, 1);
+    finish([]);
+    for (let i = 0; i < 30; i++) {
+      if (!(await (await send('history-status')).json()).running) return;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.fail('sync did not finish');
+  }, { t3DataDirectory: tmpdir() }, { readSource });
+});
+
+test('keeps the last successful snapshot when T3 is unavailable and recovers on retry', async () => {
+  const original = submission({ source: 't3code', session: 'thread', messageId: 'first', submittedAt: new Date(), text: '最近一次成功提交' });
+  const next = submission({ source: 't3code', session: 'thread', messageId: 'second', submittedAt: new Date(), text: '恢复后提交' });
+  let read = 0;
+  const readSource = async () => {
+    if (++read === 2) throw new Error('raw SQLite error');
+    return read === 1 ? [original] : [original, next];
+  };
+  await withServer(async (_directory, url) => {
+    const page = await (await fetch(url)).text();
+    const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
+    const send = type => fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type, token }) });
+    const waitForSnapshot = async () => {
+      for (let i = 0; i < 30; i++) {
+        if (!(await (await send('history-status')).json()).running) return (await fetch(url)).text();
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert.fail('sync did not finish');
+    };
+    assert.match(await waitForSnapshot(), /最近一次成功提交/);
+    await send('refresh');
+    const failed = await waitForSnapshot();
+    assert.match(failed, /同步失败/);
+    assert.match(failed, /最近一次成功提交/);
+    assert.doesNotMatch(failed, /raw SQLite error/);
+    await send('refresh');
+    const recovered = await waitForSnapshot();
+    assert.doesNotMatch(recovered, /同步失败/);
+    assert.match(recovered, /恢复后提交/);
+  }, { t3DataDirectory: tmpdir() }, { readSource });
+});
 
 test('all view clears selected calendar date and preserves other filters', async () => withServer(async (directory, url) => {
   const id = 'a'.repeat(64);
-  await writeFile(join(directory, '2026-01-02.md'), `<!-- magpie-prompt:${id} -->\n## 10:00:00 · codex · /work/project\n\n\`\`\`text\n匹配文本\n\`\`\`\n`);
+  await writeRecords(directory, [{ id, time: '2026-01-02T10:00:00', cwd: '/work/project', text: '匹配文本' }]);
   const page = await (await fetch(`${url}/?date=2026-01-02&month=2026-01&project=project&q=${encodeURIComponent('匹配')}`)).text();
   const nav = /<nav class="navigation"[^>]*>([\s\S]*?)<\/nav>/.exec(page)[1];
   const all = /<a class="nav-item active" href="([^"]*)">[\s\S]*?<span>全部<\/span><\/a>/.exec(nav);
@@ -558,7 +586,7 @@ test('orders collapsed and expanded projects by their latest matching record', a
   ].map(([time, text, project], i) => ({
     id: (i + 1).toString(16).repeat(64), time, text, cwd: `/work/${project}`, agent: 'codex',
   }));
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records }));
+  await writeRecords(directory, records);
   const projectNames = html => [...html.matchAll(/class="project-name">([^<]+)/g)].map(match => match[1]);
   const all = await (await fetch(url)).text();
   assert.deepEqual(projectNames(all).slice(0, 3), ['older-match', 'no-match', 'newer-match']);
@@ -571,10 +599,10 @@ test('orders collapsed and expanded projects by their latest matching record', a
 
 test('project facets follow other filters, retain selected zero counts, and distinguish paths', async () => withServer(async (directory, url) => {
   const records = [
-    { id: '1'.repeat(64), time: '2026-01-02T10:00:00', text: 'needle', cwd: '/old/one/shared', agent: 'codex', images: [] },
-    { id: '2'.repeat(64), time: '2026-01-01T10:00:00', text: 'other', cwd: '/old/two/shared', agent: 'codex', images: [] },
+    { id: '1'.repeat(64), time: '2026-01-02T10:00:00', text: 'needle', cwd: '/old/one/shared', agent: 'codex' },
+    { id: '2'.repeat(64), time: '2026-01-01T10:00:00', text: 'other', cwd: '/old/two/shared', agent: 'codex' },
   ];
-  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records }));
+  await writeRecords(directory, records);
   const page = await (await fetch(`${url}/?q=needle&project=${encodeURIComponent('path:/old/two/shared')}`)).text();
   const group = page.split('id="project-filters"')[1].split('id="agent-filters"')[0];
   assert.match(group, /当前匹配项目数 \/ 全部历史目录数">1 \/ 2/);

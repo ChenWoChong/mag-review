@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Keep a local diary of confirmed user submissions.",
   "magpie": {
+    "hooks": "./prompt.hooks.js",
     "page": {
       "title": "Prompt Diary",
       "titles": {
@@ -20,7 +21,7 @@
     "export-day": "node scripts/export-day.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "main": "./index.js",
   "license": "MIT",

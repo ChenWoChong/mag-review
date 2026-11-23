@@ -1,9 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { isAbsolute } from 'node:path';
 import { directoryFor } from './storage.js';
-import { writeSubmissions } from './submissions.js';
-import { readT3Submissions } from './t3-submissions.js';
 import { readAnnotations, updateAnnotations } from './annotations.js';
 import { loadRecords } from './records.js';
 import { renderPage } from './views.js';
@@ -16,28 +13,8 @@ export function createDiaryServer(options = {}, dependencies = {}) {
   const gateway = dependencies.gatewayInfo || gatewayInfo;
   const generate = dependencies.generateReview || generateReview;
   const directory = directoryFor(options);
-  const configuredPath = typeof options.t3DataDirectory === 'string' ? options.t3DataDirectory.trim() : '';
-  const t3DataDirectory = isAbsolute(configuredPath) ? configuredPath : '';
-  const readSource = dependencies.readSource || readT3Submissions;
   const token = randomBytes(32).toString('hex');
-  const lifetime = new AbortController();
-  let syncing = false;
-  let syncError = configuredPath && !t3DataDirectory ? '请为 t3DataDirectory 设置绝对路径。' : '';
   let reviewJob = null;
-  async function refresh() {
-    if (syncing || !t3DataDirectory || lifetime.signal.aborted) return;
-    syncing = true;
-    try {
-      const records = await readSource(t3DataDirectory, { signal: lifetime.signal });
-      if (lifetime.signal.aborted) return;
-      await writeSubmissions(directory, records);
-      syncError = '';
-    } catch {
-      syncError = 'T3 Code 同步失败。请检查数据目录、SQLite 版本和读取权限。';
-    } finally {
-      syncing = false;
-    }
-  }
   const server = createServer(async (req, res) => {
     const nonce = randomBytes(16).toString('base64');
     const host = req.headers.host || '';
@@ -73,8 +50,6 @@ export function createDiaryServer(options = {}, dependencies = {}) {
           filteredRequest = true;
           url = new URL(action.path, 'http://127.0.0.1');
           if (url.pathname !== '/' || url.origin !== 'http://127.0.0.1') { res.writeHead(400, cors); return res.end('Invalid path'); }
-        } else if (action.type === 'history-status') {
-          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ running: syncing }));
         } else if (action.type === 'review-status') {
           res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify(reviewJob || { state: 'idle' }));
         } else if (action.type === 'review-start') {
@@ -104,8 +79,6 @@ export function createDiaryServer(options = {}, dependencies = {}) {
             await updateAnnotations(directory, { type: 'favorite', ids: [source.id], value: true });
           }
           await updateAnnotations(directory, { type: 'feedback', id: item.id, value: action.value });
-        } else if (action.type === 'refresh') {
-          refresh();
         } else await updateAnnotations(directory, action);
         if (!filtering) { res.writeHead(200, cors); return res.end('ok'); }
         headers['Access-Control-Allow-Origin'] = 'null';
@@ -129,20 +102,9 @@ export function createDiaryServer(options = {}, dependencies = {}) {
         catch { scope = null; }
         review = { day, kind, models: info.models, selected: info.selected, report: await readReview(directory, day, kind), job: reviewJob, scope };
       }
-      return send(200, await renderPage({ records, data: annotations, t3DataDirectory, params: url.searchParams, nonce, token, running: syncing, syncError, review }));
+      return send(200, await renderPage({ records, data: annotations, directory, params: url.searchParams, nonce, token, review }));
     } catch { return send(500, '读取记录失败，请检查日志目录的权限。'); }
   });
-  if (t3DataDirectory) {
-    server.once('listening', () => {
-      refresh();
-      const timer = setInterval(refresh, 15000);
-      timer.unref?.();
-      server.once('close', () => {
-        lifetime.abort();
-        clearInterval(timer);
-      });
-    });
-  }
   return server;
 }
 

@@ -1,110 +1,97 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadRecords } from '../records.js';
-import { readSubmissions, writeSubmissions } from '../submissions.js';
-import { readT3Submissions } from '../t3-submissions.js';
+import { onRequest } from '../prompt.hooks.js';
+import { readSubmissions, verifyStore, withStore } from '../submissions.js';
 
-const schema = `
-CREATE TABLE orchestration_v2_projection_messages(message_id PRIMARY KEY, thread_id, run_id, role, created_at, payload_json);
-CREATE TABLE orchestration_v2_projection_threads(thread_id PRIMARY KEY, project_id, default_provider, deleted_at, payload_json);
-CREATE TABLE projection_projects(project_id PRIMARY KEY, workspace_root);
-CREATE TABLE orchestration_v2_projection_runs(run_id PRIMARY KEY, thread_id, provider, provider_thread_id, payload_json);
-CREATE TABLE orchestration_v2_projection_provider_threads(provider_thread_id PRIMARY KEY, driver);
-INSERT INTO projection_projects VALUES ('project', '/work/root');
-INSERT INTO orchestration_v2_projection_threads VALUES ('thread', 'project', 'codex', NULL, '{"worktreePath":"/work/tree"}');
-INSERT INTO orchestration_v2_projection_threads VALUES ('deleted', 'project', 'codex', '2026-11-24', '{}');
-INSERT INTO orchestration_v2_projection_provider_threads VALUES ('provider', 'pi');
-INSERT INTO orchestration_v2_projection_runs VALUES ('run', 'thread', 'pi', 'provider', '{"workspacePreparation":{"type":"root"}}');
-`;
-
-const prefix = '[pi-lens automated check — not a user request]';
-const submittedAt = '2026-11-23T07:23:39.207Z';
-
-function insert(messages) {
-  return messages.map(([id, payload, thread = 'thread']) => {
-    const message = JSON.stringify({ createdBy: 'user', creationSource: 'web', ...payload }).replaceAll("'", "''");
-    return `INSERT INTO orchestration_v2_projection_messages VALUES ('${id}', '${thread}', 'run', 'user', '${submittedAt}', '${message}');`;
-  }).join('\n');
+async function withDiary(run) {
+  const directory = await mkdtemp(join(tmpdir(), 'magpie-input-'));
+  const ctx = { protocol: 'responses', agent: 'codex', origin: 'local', session: 'session', options: { directory } };
+  try { await run(directory, (body, options) => onRequest(body, { ...ctx, ...options })); }
+  finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-async function withT3(run) {
-  const directory = await mkdtemp(join(tmpdir(), 'prompt-submission-'));
-  try {
-    await mkdir(join(directory, 'userdata'));
-    const db = join(directory, 'userdata', 'statev2.sqlite');
-    const sql = text => execFileSync('sqlite3', [db], { input: text });
-    sql(schema);
-    await run(directory, sql);
-  } finally { await rm(directory, { recursive: true, force: true }); }
-}
+const user = (content, id) => ({ role: 'user', content, id });
+const answer = { role: 'assistant', content: 'reply' };
 
-test('accepts T3 submissions by author and message ID, independent of text and provider context', async () => withT3(async (directory, sql) => {
-  const attachment = { id: 'thread-image', name: 'image.png', mimeType: 'image/png' };
-  const context = { version: 1, records: [
-    { kind: 'image', attachmentId: 'thread-image', contextId: 'image_one' },
-    { kind: 'image', attachmentId: 'thread-image', contextId: 'image_two' },
-    { kind: 'file', attachmentId: 'thread-image', contextId: 'file_one' },
-  ] };
-  sql(insert([
-    ['first', { text: '继续', context: { handoff: 'Context handoff (full_thread_summary): prior thread' } }],
-    ['second', { text: '继续', creationSource: 'mobile' }],
-    ['pasted', { text: `${prefix}\n原样引用\n` }],
-    ['image', { text: '', context, attachments: [attachment, { id: '../outside', mimeType: 'image/png' }] }],
-    ['handoff', { text: 'Context handoff (full_thread_summary): old\n继续', createdBy: 'agent', creationSource: 'provider' }],
-    ['title', { text: '继续', createdBy: 'agent', creationSource: 'server' }],
-    ['notification', { text: prefix, notification: {} }],
-    ['compaction', { text: '总结', idleCompaction: {} }],
-    ['agent', { text: prefix, createdBy: 'agent', creationSource: 'web' }],
-    ['unknown', { text: prefix, creationSource: 'server' }],
-    ['blank', { text: '   ' }],
-    ['deleted-message', { text: 'deleted' }, 'deleted'],
-  ]));
-  const records = await readT3Submissions(directory);
-  assert.deepEqual(records.map(row => row.messageId), ['first', 'image', 'pasted', 'second']);
-  assert.equal(records[0].submittedAt, submittedAt);
-  assert.equal(records[0].cwd, '/work/root');
-  assert.equal(records[0].projectRoot, '/work/root');
-  assert.equal(records[0].agent, 'pi');
-  assert.equal(records[0].text, '继续');
-  assert.equal(records[1].text, '');
-  assert.deepEqual(records[1].attachments, [{ ...attachment, refs: ['image_one', 'image_two'] }]);
-  assert.equal(records[2].text, `${prefix}\n原样引用\n`);
-  assert.equal(records[3].text, records[0].text);
-  assert.notEqual(records[3].id, records[0].id);
+const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=';
+
+test('captures new inputs across all four protocols and associates only gateway observations', async () => withDiary(async (directory, send) => {
+  send({ input: 'responses' });
+  send({ messages: [user('chat')] }, { protocol: 'chat' });
+  send({ messages: [user([{ type: 'text', text: 'messages' }])] }, { protocol: 'anthropic' });
+  send({ contents: [{ role: 'user', parts: [{ text: 'gemini' }] }] }, { protocol: 'gemini' });
+  send({ input: 'outside' }, { origin: 'remote' });
+  send({ input: 'unapproved key' }, { origin: 'magpie-key' });
+  assert.deepEqual((await readSubmissions(directory)).map(r => r.text), ['responses', 'chat', 'messages', 'gemini']);
+  assert.equal(verifyStore(directory).missingCapture, 0);
+  assert.equal((await stat(join(directory, 'gateway-diary.sqlite'))).mode & 0o777, 0o600);
 }));
 
-test('keeps workspace and run attribution separate from current thread defaults', async () => withT3(async (directory, sql) => {
-  sql(insert([['first', { text: 'from worktree' }], ['second', { text: 'waiting for agent' }]]));
-  sql(`
-    UPDATE orchestration_v2_projection_runs SET provider = 'magpie-codex', provider_thread_id = NULL, payload_json = '{}';
-    UPDATE orchestration_v2_projection_threads SET default_provider = 'pi' WHERE thread_id = 'thread';
-    UPDATE orchestration_v2_projection_messages SET run_id = NULL WHERE message_id = 'second';
-  `);
-  const [first, second] = await readT3Submissions(directory);
-  assert.equal(first.agent, 'codex');
-  assert.equal(first.cwd, '/work/tree');
-  assert.equal(first.projectRoot, '/work/root');
-  assert.equal(second.agent, null);
+test('deduplicates exact replays and tool rounds, while preserving two identifiable same-text inputs', async () => withDiary(async (directory, send) => {
+  const first = user('继续', 'one');
+  const tool = { type: 'function_call_output', call_id: 'call', output: 'result' };
+  assert.equal(send({ input: [first] }), undefined);
+  send({ input: [first] });
+  send({ input: [first, answer, tool] });
+  send({ input: [first, answer, user('继续', 'two')] });
+  send({ input: [user('继续', 'two')] });
+  assert.deepEqual((await readSubmissions(directory)).map(r => r.text), ['继续', '继续']);
+  assert.equal(withStore(directory, db => db.prepare('SELECT count(*) AS n FROM capture_prompts').get().n), 6);
 }));
 
-test('snapshot rebuilds idempotently and keeps identity across provider changes', async () => withT3(async (directory, sql) => {
-  assert.deepEqual(await readT3Submissions(directory), []);
-  sql(insert([['submitted', { text: '继续' }]]));
-  const [before] = await readT3Submissions(directory);
-  await writeSubmissions(directory, [before]);
-  const path = join(directory, '.submissions.json');
-  const bytes = await readFile(path, 'utf8');
-  await writeSubmissions(directory, [...await readT3Submissions(directory), before]);
-  assert.equal(await readFile(path, 'utf8'), bytes);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
-  sql("UPDATE orchestration_v2_projection_provider_threads SET driver = 'codex';");
-  const [after] = await readT3Submissions(directory);
-  assert.equal(after.id, before.id);
-  await writeSubmissions(directory, [before, after]);
-  assert.deepEqual(await readSubmissions(directory), [after]);
-  assert.equal((await loadRecords(directory))[0].agent, 'codex');
+test('uses full history boundaries without importing older messages or merging a changed history', async () => withDiary(async (directory, send) => {
+  const history = [user('old', 'old-id'), answer, user('unresolved', 'old-id-2')];
+  send({ input: history });
+  assert.deepEqual(await readSubmissions(directory), []);
+  send({ input: [...history, answer, user('继续')] });
+  send({ input: [...history, answer, user('继续')] });
+  send({ input: [user('继续')] });
+  send({ input: [...history, answer, user('继续'), answer, user('继续')] });
+  assert.deepEqual((await readSubmissions(directory)).map(r => r.text), ['继续', '继续']);
+}));
+
+test('records a new input after a long client history without importing the baseline', async () => withDiary(async (directory, send) => {
+  const history = [user('old'), ...Array.from({ length: 700 }, (_, i) => ({ ...answer, content: `previous item ${i}` }))];
+  send({ input: history });
+  send({ input: [...history, user('new after long history')] });
+  assert.deepEqual((await readSubmissions(directory)).map(row => row.text), ['new after long history']);
+}));
+
+test('identical deltas with different previous response IDs are distinct', async () => withDiary(async (directory, send) => {
+  for (const previous_response_id of ['resp_1', 'resp_1', 'resp_2']) send({ input: [user('继续')], previous_response_id });
+  assert.equal((await readSubmissions(directory)).length, 2);
+}));
+
+test('handles mixed Codex context, skips auxiliary requests and keeps arrival independent of model success', async () => withDiary(async (directory, send) => {
+  send({ input: [user('<environment_context>only context</environment_context>'), user('visible prompt')] });
+  send({ input: [user('title body')] }, { kind: 'thread_title', session: 'title' });
+  send({ input: [user('review payload')], user: 'magpie-prompt-diary-review' }, { session: 'review' });
+  send({ input: [user('[pi-lens automated check — not a user request] Address 🔴 blockers before continuing')] }, { agent: 'pi', session: 'pi' });
+  send({ input: [user('Context handoff (full_thread_summary):\nProvider context handoff.\ncombined')] }, { agent: 'pi', session: 'pi' });
+  const quoted = '[pi-lens automated check — not a user request] 是什么意思？';
+  send({ input: quoted }, { agent: 'pi', session: 'pi-quoted' });
+  assert.deepEqual((await readSubmissions(directory)).map(r => r.text), ['visible prompt', quoted]);
+  assert.equal(verifyStore(directory).observations.find(r => r.result === 'automatic').count, 2);
+}));
+
+test('rolls back a failed write and can record the same request after recovery', async () => withDiary(async (directory, send) => {
+  withStore(directory, db => db.exec("CREATE TRIGGER deny_prompt BEFORE INSERT ON prompts BEGIN SELECT RAISE(ABORT, 'test write failure'); END"));
+  assert.throws(() => send({ input: 'retry me' }), /test write failure/);
+  assert.deepEqual(verifyStore(directory).observations, []);
+  withStore(directory, db => db.exec('DROP TRIGGER deny_prompt'));
+  send({ input: 'retry me' });
+  assert.equal(verifyStore(directory).prompts, 1);
+}));
+
+test('stores actual image bytes and ignores text pointers and remote URLs', async () => withDiary(async (directory, send) => {
+  send({ input: [user([{ type: 'input_image', image_url: `data:image/png;base64,${image}` }])] });
+  send({ input: [user([{ type: 'input_image', image_url: 'https://example.com/image.png' }])] }, { session: 'remote-image' });
+  const [record] = await readSubmissions(directory);
+  assert.equal(record.text, '');
+  assert.equal(record.attachments.length, 1);
+  assert.equal(withStore(directory, db => db.prepare('SELECT count(*) AS n FROM images').get().n), 1);
+  assert.equal(verifyStore(directory).prompts, 1);
 }));

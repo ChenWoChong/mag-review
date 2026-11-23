@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get } from 'node:http';
 import { runInNewContext } from 'node:vm';
 import { createDiaryServer } from '../server.js';
-import { submission, writeSubmissions } from '../submissions.js';
 import { writeRecords } from './fixtures.mjs';
 
 async function withServer(run, options = {}, dependencies = {}) {
@@ -52,44 +51,34 @@ test('empty state and invalid or unavailable dates', async () => withServer(asyn
   assert.equal(status, 403);
 }));
 
-test('renders attachment-only submissions and preserves original copy text', async () => {
-  const t3DataDirectory = await mkdtemp(join(tmpdir(), 'diary-attachments-'));
-  try {
-    const root = join(t3DataDirectory, 'userdata', 'attachments');
-    await mkdir(root, { recursive: true });
-    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=', 'base64');
-    await writeFile(join(root, 'thread-image.png'), bytes);
-    await writeFile(join(root, 'thread-other.png'), bytes);
-    const attachments = [
-      { id: 'thread-other', name: 'image.png', mimeType: 'image/png' },
-      { id: 'thread-image', name: 'image.png', mimeType: 'image/png', refs: ['image_second'] },
-    ];
-    const reference = '![image.png](t3-context://v1/image/image_second)';
-    const context = '<t3_context version="1">\n<context kind="image" id="image_first">\nname: image.png\nattachmentId: thread-other\n</context>\n</t3_context>';
-    const path = '[Attached image "image.png" is saved at: /t3/userdata/attachments/thread-other.png]';
-    const text = `看看图片 ${reference}\n\`[Image: image.png; ref=image_second]\`\n${context}\n${path}`;
-    const base = { source: 't3code', session: 'thread', submittedAt: new Date().toISOString() };
-    const records = [
-      submission({ ...base, messageId: 'image', text: '', attachments: [attachments[0]] }),
-      submission({ ...base, messageId: 'text', text, attachments }),
-    ];
-    await withServer(async (directory, url) => {
-      await writeSubmissions(directory, records);
-      const response = await fetch(url);
-      const html = await response.text();
-      assert.equal((html.match(/<article class="card">/g) || []).length, 2);
-      const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
-      assert.match(prompt, /data-image-id="thread-image"[^>]*>image\.png<\/button>/);
-      assert.match(prompt, /<code>\[Image: image\.png; ref=image_second\]<\/code>/);
-      assert.doesNotMatch(prompt, /t3-context:\/\/|t3_context|is saved at/);
-      assert.match(html, /data-image-id="thread-other"[^>]*>image\.png<\/button>/);
-      assert.match(html, /data-copy="看看图片 !\[image\.png\]\(t3-context:\/\/v1\/image\/image_second\)/);
-      assert.match(html, /<div class="pictures" hidden><button[^>]*aria-label="放大查看图片"[^>]*><img src="data:image\/png;base64,/);
-      assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
-      assert.match(response.headers.get('content-security-policy'), /img-src data:/);
-    }, { t3DataDirectory }, { readSource: async () => records });
-  } finally { await rm(t3DataDirectory, { recursive: true, force: true }); }
-});
+test('renders attachment-only submissions and preserves original copy text', async () => withServer(async (directory, url) => {
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=', 'base64');
+  const attachments = [
+    { id: 'thread-other', name: 'image.png', mimeType: 'image/png' },
+    { id: 'thread-image', name: 'image.png', mimeType: 'image/png', refs: ['image_second'] },
+  ];
+  const reference = '![image.png](t3-context://v1/image/image_second)';
+  const context = '<t3_context version="1">\n<context kind="image" id="image_first">\nname: image.png\nattachmentId: thread-other\n</context>\n</t3_context>';
+  const path = '[Attached image "image.png" is saved at: /t3/userdata/attachments/thread-other.png]';
+  const text = `看看图片 ${reference}\n\`[Image: image.png; ref=image_second]\`\n${context}\n${path}`;
+  const records = [
+    { id: 'image', time: new Date(), text: '', attachments: [attachments[0]] },
+    { id: 'text', time: new Date(), text, attachments },
+  ];
+  await writeRecords(directory, records, [['thread-image', bytes], ['thread-other', bytes]]);
+  const response = await fetch(url);
+  const html = await response.text();
+  assert.equal((html.match(/<article class="card">/g) || []).length, 2);
+  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.match(prompt, /data-image-id="thread-image"[^>]*>image\.png<\/button>/);
+  assert.match(prompt, /<code>\[Image: image\.png; ref=image_second\]<\/code>/);
+  assert.doesNotMatch(prompt, /t3-context:\/\/|t3_context|is saved at/);
+  assert.match(html, /data-image-id="thread-other"[^>]*>image\.png<\/button>/);
+  assert.match(html, /data-copy="看看图片 !\[image\.png\]\(t3-context:\/\/v1\/image\/image_second\)/);
+  assert.match(html, /<div class="pictures" hidden><button[^>]*aria-label="放大查看图片"[^>]*><img src="data:image\/png;base64,/);
+  assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
+  assert.match(response.headers.get('content-security-policy'), /img-src data:/);
+}));
 
 test('legacy records stay outside the diary even when the confirmed timeline is empty', async () => withServer(async (directory, url) => {
   await writeFile(join(directory, '2026-01-02.md'), '网关交接摘要');
@@ -112,7 +101,7 @@ test('filters records and keeps favorites and tags locally with a protected acti
   const favorite = await (await fetch(`${url}/?view=favorites&agent=codex&project=project-one&tag=${encodeURIComponent('代码审查')}`)).text();
   assert.match(favorite, /第一条/);
   assert.match(favorite, /代码审查/);
-  assert.match(favorite, /T3 Code 用户提交/);
+  assert.match(favorite, /Magpie 网关/);
   const other = await (await fetch(`${url}/?agent=pi`)).text();
   assert.doesNotMatch(other, /第一条/);
   assert.equal((await send({ type: 'hidden', ids: [id], value: true })).status, 200);
@@ -538,60 +527,6 @@ test('open menu stays open inside its area and closes after leaving', async () =
   for (const fn of [...timers.values()]) fn();
   assert.equal(menu.open, false);
 }));
-
-test('submission sync does not reload the page and signals when it finishes', async () => {
-  let finish, reads = 0;
-  const pending = new Promise(resolve => { finish = resolve; });
-  const readSource = () => { reads++; return pending; };
-  await withServer(async (_directory, url) => {
-    const page = await (await fetch(url)).text();
-    assert.match(page, /正在同步历史记录/);
-    assert.doesNotMatch(page, /setTimeout\(\(\) => location\.reload\(\), 3000\)/);
-    const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
-    const send = type => fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type, token }) });
-    assert.equal((await (await send('history-status')).json()).running, true);
-    await send('refresh');
-    assert.equal(reads, 1);
-    finish([]);
-    for (let i = 0; i < 30; i++) {
-      if (!(await (await send('history-status')).json()).running) return;
-      await new Promise(resolve => setTimeout(resolve, 5));
-    }
-    assert.fail('sync did not finish');
-  }, { t3DataDirectory: tmpdir() }, { readSource });
-});
-
-test('keeps the last successful snapshot when T3 is unavailable and recovers on retry', async () => {
-  const original = submission({ source: 't3code', session: 'thread', messageId: 'first', submittedAt: new Date(), text: '最近一次成功提交' });
-  const next = submission({ source: 't3code', session: 'thread', messageId: 'second', submittedAt: new Date(), text: '恢复后提交' });
-  let read = 0;
-  const readSource = async () => {
-    if (++read === 2) throw new Error('raw SQLite error');
-    return read === 1 ? [original] : [original, next];
-  };
-  await withServer(async (_directory, url) => {
-    const page = await (await fetch(url)).text();
-    const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
-    const send = type => fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type, token }) });
-    const waitForSnapshot = async () => {
-      for (let i = 0; i < 30; i++) {
-        if (!(await (await send('history-status')).json()).running) return (await fetch(url)).text();
-        await new Promise(resolve => setTimeout(resolve, 5));
-      }
-      assert.fail('sync did not finish');
-    };
-    assert.match(await waitForSnapshot(), /最近一次成功提交/);
-    await send('refresh');
-    const failed = await waitForSnapshot();
-    assert.match(failed, /同步失败/);
-    assert.match(failed, /最近一次成功提交/);
-    assert.doesNotMatch(failed, /raw SQLite error/);
-    await send('refresh');
-    const recovered = await waitForSnapshot();
-    assert.doesNotMatch(recovered, /同步失败/);
-    assert.match(recovered, /恢复后提交/);
-  }, { t3DataDirectory: tmpdir() }, { readSource });
-});
 
 test('all view clears selected calendar date and preserves other filters', async () => withServer(async (directory, url) => {
   const id = 'a'.repeat(64);

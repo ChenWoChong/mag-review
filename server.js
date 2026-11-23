@@ -7,13 +7,18 @@ import { importHistory } from './history-import.js';
 import { readAnnotations, updateAnnotations } from './annotations.js';
 import { loadRecords } from './records.js';
 import { renderPage } from './views.js';
+import { gatewayInfo, generateReview, readReview, saveReview, reviewInput } from './review.js';
+import { hashText } from './identity.js';
 
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
-export function createDiaryServer(options = {}) {
+export function createDiaryServer(options = {}, dependencies = {}) {
+  const gateway = dependencies.gatewayInfo || gatewayInfo;
+  const generate = dependencies.generateReview || generateReview;
   const directory = directoryFor(options);
   const token = randomBytes(32).toString('hex');
   let syncing = false;
+  let reviewJob = null;
   return createServer(async (req, res) => {
     const nonce = randomBytes(16).toString('base64');
     const host = req.headers.host || '';
@@ -49,6 +54,35 @@ export function createDiaryServer(options = {}) {
           filteredRequest = true;
           url = new URL(action.path, 'http://127.0.0.1');
           if (url.pathname !== '/' || url.origin !== 'http://127.0.0.1') { res.writeHead(400, cors); return res.end('Invalid path'); }
+        } else if (action.type === 'review-status') {
+          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify(reviewJob || { state: 'idle' }));
+        } else if (action.type === 'review-start') {
+          if (reviewJob?.state === 'running') { res.writeHead(409, cors); return res.end('已有复盘正在生成'); }
+          if (!datePattern.test(action.day || '') || !['daily', 'weekly'].includes(action.kind) || typeof action.model !== 'string') { res.writeHead(400, cors); return res.end('参数无效'); }
+          const info = await gateway(options);
+          if (!info.models.includes(action.model)) { res.writeHead(400, cors); return res.end('模型不可用，请刷新页面'); }
+          reviewJob = { state: 'running', day: action.day, kind: action.kind };
+          const job = reviewJob;
+          Promise.resolve().then(async () => {
+            const { records } = await loadRecords(directory);
+            const data = await readAnnotations(directory);
+            const report = await generate({ records, data, day: action.day, kind: action.kind, model: action.model, gateway: info.origin });
+            await saveReview(directory, report);
+            job.state = 'done';
+          }).catch(error => { job.state = 'error'; job.error = String(error?.message || '生成失败').slice(0, 240); });
+          res.writeHead(200, cors); return res.end('ok');
+        } else if (action.type === 'review-feedback') {
+          const report = await readReview(directory, action.day, action.kind);
+          const item = report?.sections?.templates?.find(candidate => candidate.id === action.id);
+          if (!item || !['saved', 'dismissed'].includes(action.value)) { res.writeHead(400, cors); return res.end('无效的候选'); }
+          if (action.value === 'saved') {
+            const { records } = await loadRecords(directory);
+            const source = records.find(record => record.id === item.sources[0] || record.aliases.includes(item.sources[0]));
+            if (!source) { res.writeHead(400, cors); return res.end('原始记录已不可用'); }
+            await updateAnnotations(directory, { type: 'template-save', id: hashText('review-template:' + item.id), title: item.title.slice(0, 80), text: source.text });
+            await updateAnnotations(directory, { type: 'favorite', ids: [source.id, ...source.aliases], value: true });
+          }
+          await updateAnnotations(directory, { type: 'feedback', id: item.id, value: action.value });
         } else if (action.type === 'refresh') {
           if (!syncing) {
             syncing = true;
@@ -75,7 +109,17 @@ export function createDiaryServer(options = {}) {
       }
       let syncError = '';
       if (files.includes('.history-error')) syncError = await readFile(join(directory, '.history-error'), 'utf8');
-      return send(200, await renderPage({ records, history, data: annotations, directory, params: url.searchParams, nonce, token, running: syncing || files.includes('.history-import.lock'), syncError, fallback }));
+      let review = null;
+      if (url.searchParams.get('view') === 'review') {
+        const day = url.searchParams.get('reviewDate') || new Date().toLocaleDateString('en-CA');
+        const kind = url.searchParams.get('reviewKind') === 'weekly' ? 'weekly' : 'daily';
+        const info = await gateway(options);
+        let scope;
+        try { const input = reviewInput(records, annotations, kind, day); scope = { from: input.from, total: input.total, included: input.entries.length, truncated: input.truncated }; }
+        catch { scope = null; }
+        review = { day, kind, models: info.models, selected: info.selected, report: await readReview(directory, day, kind), job: reviewJob, scope };
+      }
+      return send(200, await renderPage({ records, history, data: annotations, directory, params: url.searchParams, nonce, token, running: syncing || files.includes('.history-import.lock'), syncError, fallback, review }));
     } catch { return send(500, '读取记录失败，请检查日志目录的权限。'); }
   });
 }

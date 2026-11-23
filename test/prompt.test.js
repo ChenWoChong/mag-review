@@ -96,3 +96,12 @@ test('uses a stable native message ID across retries but keeps a new identical m
   await onRequest({ input: [{ role: 'user', content: ctx.query }, { role: 'user', content: ctx.query }] }, ctx);
   assert.equal(((await log(directory)).match(/<!-- magpie-prompt:/g) || []).length, 2);
 }));
+
+test('does not record the plugin’s own review model request', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'magpie-review-hook-'));
+  try {
+    const { onRequest } = await import('../prompt.hooks.js');
+    await onRequest({ user: 'magpie-prompt-diary-review', messages: [{ role: 'user', content: 'internal review input' }] }, { origin: 'local', agent: 'codex', query: 'internal review input', options: { directory } });
+    assert.equal((await readdir(directory)).length, 0);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

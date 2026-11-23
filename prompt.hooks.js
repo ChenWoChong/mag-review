@@ -97,7 +97,7 @@ async function loadIndex(directory) {
 async function record(body, ctx) {
   // Gateway sharing keys can be used by other people. Record only requests
   // Magpie identifies as coming from this computer, and skip subagents.
-  if (!['local', 'magpie-key'].includes(ctx.origin) || ctx.kind === 'subagent') return;
+  if (!['local', 'magpie-key'].includes(ctx.origin) || ctx.kind === 'subagent' || body?.user === 'magpie-prompt-diary-review') return;
   const prompt = ctx.query;
   if (typeof prompt !== 'string' || !prompt.trim()) return;
   if (isAutomaticPrompt(ctx.caller?.agent || ctx.agent, prompt)) return;

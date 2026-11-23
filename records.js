@@ -63,7 +63,7 @@ export async function loadRecords(directory, options = {}) {
         match.aliases.push(entry.id);
         match.images = [...new Set([...match.images, ...entry.images])];
       } else {
-        const record = { ...entry, day, source: '网关实时记录', aliases: [] };
+        const record = { ...entry, sessionHash: session, day, source: '网关实时记录', aliases: [] };
         local.push(record);
         if (native) localEvents.set(native, record);
       }

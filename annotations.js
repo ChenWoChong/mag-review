@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const empty = () => ({ version: 1, entries: {}, pinned: [], templates: {} });
+const empty = () => ({ version: 1, entries: {}, pinned: [], templates: {}, feedback: {} });
 let pending = Promise.resolve();
 
 export async function readAnnotations(directory) {
@@ -9,6 +9,7 @@ export async function readAnnotations(directory) {
     const data = JSON.parse(await readFile(join(directory, '.annotations.json'), 'utf8'));
     if (data.version !== 1 || !data.entries || !Array.isArray(data.pinned)) throw new Error('Invalid annotations');
     data.templates ||= {};
+    data.feedback ||= {};
     return data;
   } catch (error) {
     if (error.code === 'ENOENT') return empty();
@@ -20,7 +21,10 @@ export function updateAnnotations(directory, action) {
   const work = pending.then(async () => {
     const data = await readAnnotations(directory);
     const tag = typeof action.tag === 'string' ? action.tag.trim() : '';
-    if (action.type === 'template-save' || action.type === 'template-delete') {
+    if (action.type === 'feedback') {
+      if (!/^[a-f0-9]{64}$/.test(action.id || '') || !['saved', 'dismissed'].includes(action.value)) throw new Error('Invalid feedback');
+      data.feedback[action.id] = action.value;
+    } else if (action.type === 'template-save' || action.type === 'template-delete') {
       if (!/^[a-f0-9]{64}$/.test(action.id || '')) throw new Error('Invalid template');
       if (action.type === 'template-delete') delete data.templates[action.id];
       else {

@@ -59,7 +59,9 @@ test('renders separate cards and saved images while preserving original copy tex
   const html = await response.text();
   assert.equal((html.match(/<article class="card">/g) || []).length, 2);
   assert.match(html, /data-copy="看看图片\n换行"/);
-  assert.match(html, /<button type="button" class="image-preview" aria-label="放大查看图片"><img src="data:image\/png;base64,/);
+  assert.match(html, /<div class="pictures" hidden><button type="button" class="image-preview" aria-label="放大查看图片"><img src="data:image\/png;base64,/);
+  assert.doesNotMatch(html, /class="toggle-pictures"/);
+  assert.match(html, /class="toggle-card-info" aria-expanded="false">显示详情/);
   assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
   assert.match(html, /没有图片 &lt;hello&gt;/);
   assert.match(response.headers.get('content-security-policy'), /img-src data:/);
@@ -264,7 +266,7 @@ test('navigates only the selected card images with buttons, keys and swipes', as
   const events = {}, preview = { src: '' }, prev = {}, next = {}, count = {};
   const elements = { img: preview, '.preview-prev': prev, '.preview-next': next, '.preview-count': count };
   const dialog = { open: false, querySelector: key => elements[key], showModal() { this.open = true; }, close() { this.open = false; } };
-  const document = { body: { dataset: {} }, querySelector: key => key === '.image-dialog' ? dialog : null, addEventListener: (name, fn) => { events[name] = fn; } };
+  const document = { body: { dataset: {} }, querySelector: key => key === '.image-dialog' ? dialog : null, addEventListener: (name, fn) => { const previous = events[name]; events[name] = previous ? event => { previous(event); fn(event); } : fn; } };
   const parent = { postMessage: () => {} }, window = { parent, addEventListener: () => {} };
   runInNewContext(script, { document, window, location: { pathname: '/', search: '' }, setTimeout, clearTimeout });
   const group = { querySelectorAll: () => buttons };
@@ -303,4 +305,128 @@ test('renders T3 image metadata as attachment labels while preserving copied tex
   assert.match(prompt, /&lt;context kind=&quot;other&quot;/);
   assert.match(html, /data-copy="[^\"]*\[Image: image\.png; ref=image_123\]/);
   assert.match(html, /attachmentId: example-id/);
+}));
+
+test('review date and range form updates within the sandbox', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const events = {}, oldGroups = [], newGroups = [];
+  const nextSidebar = { scrollTop: 0, querySelectorAll: () => newGroups };
+  const oldSidebar = { scrollTop: 0, querySelectorAll: () => oldGroups, replaceWith: () => {} };
+  const nextMain = {}, oldMain = { querySelector: () => null, replaceWith: () => {} };
+  const document = { body: { dataset: { token: 'secret' } }, querySelector: key => ({ '.sidebar': oldSidebar, '.main': oldMain })[key] || null, addEventListener: (name, fn) => { events[name] = fn; } };
+  const parent = { postMessage: () => {} }, window = { parent, addEventListener: () => {} };
+  const location = { pathname: '/', search: '?view=review', href: 'http://127.0.0.1:3479/?view=review', assign: () => { throw new Error('unexpected navigation'); } };
+  let path;
+  const fakeFetch = async (_url, options) => { path = JSON.parse(options.body).path; return { ok: true, text: async () => 'html' }; };
+  class DOMParser { parseFromString() { return { querySelector: key => ({ '.sidebar': nextSidebar, '.main': nextMain })[key] }; } }
+  const history = { pushState: () => {} };
+  runInNewContext(script, { window, document, location, history, fetch: fakeFetch, DOMParser, URL, setTimeout, clearTimeout });
+  const form = { matches: selector => selector === '.review-scope', querySelector: selector => ({ value: selector.includes('reviewDate') ? '2026-11-20' : 'weekly' }) };
+  let prevented = false;
+  events.submit({ target: form, preventDefault: () => { prevented = true; } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prevented, true);
+  assert.equal(path, '/?view=review&reviewDate=2026-11-20&reviewKind=weekly');
+}));
+
+test('copies only selected prompt text after an explicit click', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const handlers = {}, text = '选中的文字';
+  const prompt = {}, node = { nodeType: 1, closest: selector => selector === '.prompt' ? prompt : null };
+  const selection = { isCollapsed: false, rangeCount: 1, anchorNode: node, focusNode: node, toString: () => text, getRangeAt: () => ({ getBoundingClientRect: () => ({ left: 20, top: 80, bottom: 100, width: 100 }) }) };
+  const button = { hidden: true, offsetWidth: 70, offsetHeight: 25, style: {}, dataset: {}, textContent: '', classList: { contains: name => name === 'selection-copy' }, closest: selector => selector === 'button' || selector === '.selection-copy' ? button : null };
+  const document = { body: { dataset: {} }, querySelector: key => key === '.selection-copy' ? button : null, addEventListener: (name, fn) => { handlers[name] = fn; } };
+  const parent = { postMessage: () => {} }, window = { parent, addEventListener: () => {}, getSelection: () => selection, innerWidth: 500, innerHeight: 500 };
+  let copied = '';
+  const navigator = { clipboard: { writeText: async value => { copied = value; } } };
+  runInNewContext(script + '\nshowSelectionCopy();', { document, window, navigator, location: { pathname: '/', search: '' }, setTimeout: () => 1, clearTimeout: () => {} });
+  assert.equal(button.hidden, false);
+  assert.equal(copied, '');
+  await handlers.click({ target: button });
+  assert.equal(copied, text);
+  assert.equal(button.textContent, '已复制');
+}));
+
+test('groups timeline cards by day and keeps controls outside collapsed cards', async () => withServer(async (directory, url) => {
+  const records = [
+    { id: 'a'.repeat(64), time: new Date(2026, 0, 2, 10).toISOString(), text: '第一天早上', cwd: '/work', agent: 'codex' },
+    { id: 'b'.repeat(64), time: new Date(2026, 0, 2, 11).toISOString(), text: '第一天上午', cwd: '/work', agent: 'codex' },
+    { id: 'c'.repeat(64), time: new Date(2026, 0, 3, 9).toISOString(), text: '第二天', cwd: '/work', agent: 'codex' },
+  ];
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records }));
+  const page = await (await fetch(url)).text();
+  assert.equal((page.match(/class="timeline-day"/g) || []).length, 2);
+  assert.equal((page.match(/class="timeline-row"/g) || []).length, 3);
+  assert.equal((page.match(/class="card-footer" hidden/g) || []).length, 3);
+  assert.equal((page.match(/class="more timeline-actions"/g) || []).length, 3);
+  assert.ok(page.indexOf('2026-01-03</h3>') < page.indexOf('2026-01-02</h3>'));
+  assert.match(page, /<time class="timeline-time" datetime="2026-01-02T11:00:00">11:00:00<\/time><article class="card">/);
+  assert.match(page, /class="toggle-card-info" aria-expanded="false">显示详情/);
+  const ascending = await (await fetch(`${url}/?sort=asc`)).text();
+  assert.ok(ascending.indexOf('2026-01-02</h3>') < ascending.indexOf('2026-01-03</h3>'));
+}));
+
+test('timeline menu toggles details and opens editors on its own card', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const handlers = {}, footer = { hidden: true }, pictures = { hidden: true, querySelectorAll: () => [{}, {}] }, input = { value: '', focus() {} }, textarea = { value: '' };
+  const tagEditor = { hidden: true }, editor = { hidden: true, querySelector: selector => selector === 'input' ? input : textarea };
+  const card = { querySelector: selector => ({ '.tag-editor': tagEditor, '.tag-editor input': input, '.template-editor': editor })[selector] };
+  const menu = { open: true }, copy = { dataset: { copy: '完整原文' } };
+  const row = { querySelector: selector => ({ '.card-footer': footer, '.pictures': pictures, '.card': card, '.copy': copy })[selector] };
+  const document = { body: { dataset: {} }, querySelector: () => null, addEventListener: (name, fn) => { handlers[name] = fn; } };
+  const parent = { postMessage() {} }, window = { parent, addEventListener() {} };
+  runInNewContext(script, { document, window, location: { pathname: '/', search: '' }, setTimeout, clearTimeout });
+  const button = name => ({ dataset: {}, textContent: '', setAttribute(key, value) { this[key] = value; }, classList: { contains: value => value === name }, closest: selector => ({ '.timeline-row': row, '.more': menu, 'details': menu, 'button': null })[selector] });
+  const click = target => handlers.click({ target: { closest: selector => selector === 'button' ? target : null } });
+  const toggle = button('toggle-card-info');
+  await click(toggle);
+  assert.equal(footer.hidden, false);
+  assert.equal(pictures.hidden, false);
+  assert.equal(toggle.textContent, '隐藏详情');
+  assert.equal(toggle['aria-expanded'], 'true');
+  assert.equal(menu.open, false);
+  await click(toggle);
+  assert.equal(footer.hidden, true);
+  assert.equal(pictures.hidden, true);
+  assert.equal(toggle['aria-expanded'], 'false');
+  menu.open = true;
+  await click(button('add-tag'));
+  assert.equal(tagEditor.hidden, false);
+  assert.equal(menu.open, false);
+  await click(button('edit-template'));
+  assert.equal(editor.hidden, false);
+  assert.equal(textarea.value, '完整原文');
+}));
+
+test('closes an open card menu on outside click or Escape', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const handlers = {}, inside = {}, outside = { closest: () => null };
+  let focused = false;
+  const menu = { open: true, contains: element => element === inside, querySelector: () => ({ focus: () => { focused = true; } }) };
+  const document = { body: { dataset: {} }, querySelector: () => null, querySelectorAll: selector => selector === '.timeline-actions[open]' && menu.open ? [menu] : [], addEventListener: (name, fn) => { handlers[name] = fn; } };
+  const parent = { postMessage() {} }, window = { parent, addEventListener() {} };
+  runInNewContext(script, { document, window, location: { pathname: '/', search: '' }, setTimeout, clearTimeout });
+  await handlers.click({ target: outside });
+  assert.equal(menu.open, false);
+  menu.open = true;
+  handlers.keydown({ key: 'Escape', target: outside });
+  assert.equal(menu.open, false);
+  assert.equal(focused, true);
+}));
+
+test('removes trailing blank lines left by hidden T3 image metadata', async () => withServer(async (directory, url) => {
+  const text = '第一行\n\n第二行 [Image: image.png; ref=image_123]\n\n<t3_context version="1">\n<context kind="image" id="image_123">\nname: image.png\nmimeType: image/png\nsizeBytes: 100\nattachmentId: attachment-123\n</context>\n</t3_context>';
+  const record = { id: 'e'.repeat(64), time: new Date().toISOString(), text, cwd: '/work', agent: 'codex', images: [] };
+  await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, sessions: 1, read: 1, records: [record] }));
+  const html = await (await fetch(url)).text();
+  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.match(prompt, /^第一行\n\n第二行/);
+  assert.match(prompt, /image\.png<\/span>$/);
+  assert.doesNotMatch(prompt, /\s+$/);
+  assert.match(html, /attachmentId: attachment-123/);
+  assert.match(html, /data-copy="第一行\n\n第二行/);
 }));

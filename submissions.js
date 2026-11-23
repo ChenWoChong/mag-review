@@ -5,7 +5,7 @@ import { hashText } from './identity.js';
 
 const snapshotName = '.submissions.json';
 
-export function submission({ source, session, messageId, submittedAt, text, cwd, agent, attachments = [] }) {
+export function submission({ source, session, messageId, submittedAt, text, cwd, projectRoot, agent, attachments = [] }) {
   if (!source || !session || !messageId || typeof text !== 'string' || (!text.trim() && !attachments.length)) return null;
   const time = Date.parse(submittedAt);
   if (!Number.isFinite(time)) return null;
@@ -17,6 +17,7 @@ export function submission({ source, session, messageId, submittedAt, text, cwd,
     submittedAt: new Date(time).toISOString(),
     text,
     cwd,
+    projectRoot,
     agent,
     attachments,
   };

@@ -67,6 +67,7 @@ test('accepts T3 submissions by author and message ID, independent of text and p
   assert.deepEqual(records.map(row => row.messageId), ['first', 'image', 'pasted', 'second']);
   assert.equal(records[0].submittedAt, submittedAt);
   assert.equal(records[0].cwd, '/work/root');
+  assert.equal(records[0].projectRoot, '/work/root');
   assert.equal(records[0].agent, 'pi');
   assert.equal(records[0].text, '继续');
   assert.equal(records[1].text, '');
@@ -74,6 +75,20 @@ test('accepts T3 submissions by author and message ID, independent of text and p
   assert.equal(records[2].text, `${prefix}\n原样引用\n`);
   assert.equal(records[3].text, records[0].text);
   assert.notEqual(records[3].id, records[0].id);
+}));
+
+test('keeps workspace and run attribution separate from current thread defaults', async () => withT3(async (directory, sql) => {
+  sql(insert([['first', { text: 'from worktree' }], ['second', { text: 'waiting for agent' }]]));
+  sql(`
+    UPDATE orchestration_v2_projection_runs SET provider = 'magpie-codex', provider_thread_id = NULL, payload_json = '{}';
+    UPDATE orchestration_v2_projection_threads SET default_provider = 'pi' WHERE thread_id = 'thread';
+    UPDATE orchestration_v2_projection_messages SET run_id = NULL WHERE message_id = 'second';
+  `);
+  const [first, second] = await readT3Submissions(directory);
+  assert.equal(first.agent, 'codex');
+  assert.equal(first.cwd, '/work/tree');
+  assert.equal(first.projectRoot, '/work/root');
+  assert.equal(second.agent, null);
 }));
 
 test('snapshot rebuilds idempotently and keeps identity across provider changes', async () => withT3(async (directory, sql) => {

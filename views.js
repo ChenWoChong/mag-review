@@ -31,25 +31,46 @@ function url(params, changes) {
   const s = q.toString();
   return `/${s ? `?${esc(s)}` : ''}`;
 }
-function filtered(records, data, params) {
+const projectKey = record => record.projectId || record.project;
+const agentKey = record => record.agent || 'unknown';
+
+function resolveProject(records, value) {
+  if (!value || records.some(record => projectKey(record) === value)) return value;
+  const aliases = new Set(records.filter(record => record.project === value || (record.cwd && `path:${record.cwd}` === value)).map(projectKey));
+  return aliases.size === 1 ? aliases.values().next().value : value;
+}
+
+function filterScope(records, data, params) {
   const view = params.get('view') || 'all';
   const start = rangeStart(params.get('range'));
   const query = (params.get('q') || '').trim().toLocaleLowerCase();
+  const day = today();
+  const week = before(6);
+  const date = params.get('date');
+  const tag = params.get('tag');
   return records.filter(record => {
     const mark = annotate(record, data);
     if (view === 'hidden' ? !mark.hidden : mark.hidden) return false;
-    if ((view === 'today' || view === 'review') && record.day !== today()) return false;
-    if (view === 'week' && record.day < before(6)) return false;
-    if (start && (record.day < start || record.day > today())) return false;
+    if (view === 'today' && record.day !== day) return false;
+    if (view === 'week' && record.day < week) return false;
+    if (start && (record.day < start || record.day > day)) return false;
     if (query && !record.text.toLocaleLowerCase().includes(query)) return false;
     if (view === 'images' && !record.hasImage) return false;
     if (view === 'favorites' && !mark.favorite) return false;
-    if (params.get('date') && record.day !== params.get('date')) return false;
-    if (params.get('agent') && record.agent !== params.get('agent')) return false;
-    if (params.get('project') && (record.projectId || record.project) !== params.get('project') && record.project !== params.get('project')) return false;
-    if (params.get('tag') && !mark.tags.includes(params.get('tag'))) return false;
+    if (date && record.day !== date) return false;
+    if (tag && !mark.tags.includes(tag)) return false;
     return true;
   });
+}
+
+function facetCounts(records, key) {
+  const counts = new Map();
+  for (const record of records) {
+    const value = key(record);
+    if (!counts.has(value)) counts.set(value, { count: 0, latest: record.submittedAt });
+    counts.get(value).count++;
+  }
+  return counts;
 }
 
 function heatmap(records, params) {
@@ -160,52 +181,61 @@ export async function renderPage({ records, data, t3DataDirectory, params, nonce
   const range = ranges.find(([id]) => id === (params.get('range') || '')) || ranges[0];
   const rangeMenu = ranges.map(([id, label]) => `<a class="range-option${range[0] === id ? ' active' : ''}" href="${url(params, { range: id, date: '', page: '' })}"${range[0] === id ? ' aria-current="true"' : ''}>${label}</a>`).join('');
   const navHTML = nav.map(([id, title]) => `<a class="nav-item${view === id ? ' active' : ''}" href="${url(params, { view: id === 'all' ? '' : id, ...(id === 'all' ? { date: '' } : {}), page: '' })}">${icons[id]}<span>${title}</span></a>`).join('');
-  const unique = key => [...new Set(visible.map(r => r[key]).filter(Boolean))].sort((a,b) => a.localeCompare(b, 'zh-CN'));
-  const projectParams = new URLSearchParams(params);
-  projectParams.delete('project');
-  const matchingProjects = filtered(records, data, projectParams);
+  const currentAgent = params.get('agent');
+  const currentProject = resolveProject(records, params.get('project'));
+  const inProject = record => !currentProject || projectKey(record) === currentProject;
+  const byAgent = record => !currentAgent || agentKey(record) === currentAgent;
+  const scope = filterScope(records, data, params);
+  const projectCounts = facetCounts(scope.filter(byAgent), projectKey);
+  const agentCounts = facetCounts(scope.filter(inProject), agentKey);
+  const facetRecords = view === 'hidden' ? records.filter(record => annotate(record, data).hidden) : visible;
+  const facetView = view === 'templates' || view === 'review' ? '' : view;
+  const facetHref = (key, value) => url(params, { [key]: value, view: facetView === 'all' ? '' : facetView, page: '' });
   const projectMap = new Map();
-  for (const record of visible) {
-    const id = record.projectId || record.project;
-    if (!id) continue;
-    const project = projectMap.get(id) || { id, name: record.project, path: record.projectPath || record.cwd || '', kind: record.projectKind || 'unconfirmed', count: 0, latest: '', latestMatch: '' };
-    if (record.submittedAt > project.latest) project.latest = record.submittedAt;
-    projectMap.set(id, project);
+  for (const record of facetRecords) {
+    const id = projectKey(record);
+    if (projectMap.has(id)) continue;
+    const match = projectCounts.get(id);
+    projectMap.set(id, {
+      id, name: record.project, path: record.projectPath, kind: record.projectKind,
+      count: match?.count || 0, latest: record.submittedAt, latestMatch: match?.latest || '',
+    });
   }
-  for (const record of matchingProjects) {
-    const project = projectMap.get(record.projectId || record.project);
-    if (!project) continue;
-    project.count++;
-    if (record.submittedAt > project.latestMatch) project.latestMatch = record.submittedAt;
+  const projectTotal = projectMap.size;
+  if (currentProject && !projectMap.has(currentProject)) {
+    projectMap.set(currentProject, { id: currentProject, name: params.get('project'), count: 0, latest: '', latestMatch: '' });
   }
   const projects = [...projectMap.values()].sort((a, b) =>
     b.latestMatch.localeCompare(a.latestMatch) || b.latest.localeCompare(a.latest) || a.name.localeCompare(b.name, 'zh-CN')
   );
-  const currentProject = params.get('project');
-  const isCurrentProject = project => currentProject === project.id || currentProject === project.name;
+  const isCurrentProject = project => currentProject === project.id;
   const nameCounts = new Map();
   for (const project of projects) nameCounts.set(project.name, (nameCounts.get(project.name) || 0) + 1);
   const projectLink = project => {
     const current = isCurrentProject(project);
-    const suffix = nameCounts.get(project.name) > 1 && project.path ? ` · ${dirname(project.path)}` : '';
+    const parent = nameCounts.get(project.name) > 1 && project.path ? dirname(project.path) : '';
     const kind = { directory: '其他目录', unconfirmed: '路径未确认', unknown: '未归类' }[project.kind];
-    const detail = [suffix && suffix.slice(3), kind].filter(Boolean).join(' · ');
-    return `<a class="filter-item project-item local-filter${current ? ' active' : ''}" title="${esc(project.path || project.name)}${kind ? ` · ${kind}` : ''}" href="${url(params, { project: current ? '' : project.id, page: '' })}"><span class="project-name">${esc(project.name)}${detail ? `<small>${esc(detail)}</small>` : ''}</span><span class="project-count">${project.count}</span></a>`;
+    const detail = [parent, kind].filter(Boolean).join(' · ');
+    return `<a class="filter-item project-item local-filter${current ? ' active' : ''}"${current ? ' aria-current="true"' : ''} title="${esc(project.path || project.name)}${kind ? ` · ${kind}` : ''}" href="${facetHref('project', current ? '' : project.id)}"><span class="project-name">${esc(project.name)}${detail ? `<small>${esc(detail)}</small>` : ''}</span><span class="project-count">${project.count}</span></a>`;
   };
-  const matched = projects.filter(project => project.count || isCurrentProject(project));
-  const initial = matched.slice(0, 6);
-  const selected = matched.find(isCurrentProject);
+  const initial = projects.filter(project => project.count).slice(0, 6);
+  const selected = projectMap.get(currentProject);
   if (selected && !initial.includes(selected)) initial.push(selected);
   const extra = projects.filter(project => !initial.includes(project));
-  const projectGroup = `<details class="group" id="project-filters"${currentProject ? ' open' : ''}><summary><span class="group-title">${icons.project}项目</span><span class="group-count" title="当前匹配项目数 / 全部历史目录数">${projects.filter(project => project.count).length} / ${projects.length} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${initial.map(projectLink).join('') || '<span class="hint">当前筛选无匹配项目</span>'}${extra.length ? `<details class="project-more"><summary>展开全部项目（${extra.length}）</summary>${extra.map(projectLink).join('')}</details>` : ''}</div></details>`;
-  const groups = (label, key) => {
-    const vals = unique(key), current = params.get(key);
-    const links = vals.map(value => `<a class="filter-item${current === value ? ' active' : ''}" title="${esc(value)}" href="${url(params, { [key]: current === value ? '' : value, date: '', page: '' })}">${esc(value)}</a>`).join('');
-    return `<details class="group" id="${key}-filters"${current ? ' open' : ''}><summary><span class="group-title">${icons[key]}${label}</span><span class="group-count">${vals.length} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${links || '<span class="hint">暂无记录</span>'}</div></details>`;
-  };
+  const projectGroup = `<details class="group" id="project-filters"${currentProject ? ' open' : ''}><summary><span class="group-title">${icons.project}项目</span><span class="group-count" title="当前匹配项目数 / 全部历史项目数">${projectCounts.size} / ${projectTotal} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${projectCounts.size ? '' : '<span class="hint">当前筛选无匹配项目</span>'}${initial.map(projectLink).join('')}${extra.length ? `<details class="project-more"><summary>更多项目（${extra.length}）</summary>${extra.map(projectLink).join('')}</details>` : ''}</div></details>`;
+  const agentName = agent => agent === 'unknown' ? '未知 Agent' : agent;
+  const agentKeys = new Set(facetRecords.map(agentKey));
+  const agentTotal = agentKeys.size;
+  if (currentAgent) agentKeys.add(currentAgent);
+  const agents = [...agentKeys].sort((a, b) => Number(agentCounts.has(b)) - Number(agentCounts.has(a)) || agentName(a).localeCompare(agentName(b), 'zh-CN'));
+  const agentLinks = agents.map(agent => {
+    const current = currentAgent === agent;
+    return `<a class="filter-item agent-item local-filter${current ? ' active' : ''}"${current ? ' aria-current="true"' : ''} href="${facetHref('agent', current ? '' : agent)}"><span>${esc(agentName(agent))}</span><span class="agent-count">${agentCounts.get(agent)?.count || 0}</span></a>`;
+  }).join('');
+  const agentGroup = `<details class="group" id="agent-filters"${currentAgent ? ' open' : ''}><summary><span class="group-title">${icons.agent}Agent</span><span class="group-count" title="当前匹配 Agent 数 / 全部历史 Agent 数">${agentCounts.size} / ${agentTotal} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${agentCounts.size ? '' : '<span class="hint">当前筛选无匹配 Agent</span>'}${agentLinks}</div></details>`;
   const tags = [...new Set(visible.flatMap(r => annotate(r, data).tags))].sort((a,b) => a.localeCompare(b, 'zh-CN'));
   const tagLinks = tags.sort((a,b) => Number(data.pinned.includes(b)) - Number(data.pinned.includes(a))).map(tag => `<div class="tag-row"><a class="filter-item${params.get('tag') === tag ? ' active' : ''}" href="${url(params, { tag: params.get('tag') === tag ? '' : tag, date: '', page: '' })}"># ${esc(tag)}</a><button class="pin-tag" data-tag="${esc(tag)}" data-value="${!data.pinned.includes(tag)}" title="${data.pinned.includes(tag) ? '取消置顶' : '置顶标签'}">${data.pinned.includes(tag) ? '★' : '☆'}</button></div>`).join('');
-  let list = view === 'templates' ? [] : filtered(records, data, params);
+  let list = view === 'templates' ? [] : scope.filter(record => inProject(record) && byAgent(record));
   if (params.get('sort') === 'asc') list.reverse();
   if (view === 'random' && list.length) list = [list[Math.floor(Math.random() * list.length)]];
   const templates = view === 'templates' ? Object.entries(data.templates || {}) : [];
@@ -235,10 +265,16 @@ export async function renderPage({ records, data, t3DataDirectory, params, nonce
   const text = items.length ? content : `<div class="empty"><strong>这里还没有记录</strong><p>试试其他日期或筛选条件。</p></div>`;
   const lastId = view === 'templates' ? pageTemplates.at(-1)?.[0] : pageRecords.at(-1)?.id;
   const pager = cursorMissing ? '<div class="cursor-expired">记录已变化，请刷新页面后重试。</div>' : lastId && start + items.length < total ? `<div class="load-more-sentinel" data-next="${url(params, { after: lastId, page: '' })}" role="status"><span>正在加载更多…</span><button type="button" class="load-retry" hidden>重试</button></div>` : '';
-  const filterLabels = [params.get('date'), params.get('agent'), projects.find(isCurrentProject)?.name || params.get('project'), params.get('tag') && `#${params.get('tag')}`].filter(Boolean).map(x => `<span class="filter-chip">${esc(x)}</span>`).join('');
+  const facetChip = (key, value, label) => value ? `<a class="filter-chip local-filter" href="${facetHref(key, '')}" aria-label="${label}">${esc(value)} ×</a>` : '';
+  const filterLabels = [
+    params.get('date') ? `<span class="filter-chip">${esc(params.get('date'))}</span>` : '',
+    facetChip('agent', currentAgent && agentName(currentAgent), '清除 Agent 筛选'),
+    facetChip('project', selected?.name, '清除项目筛选'),
+    params.get('tag') ? `<span class="filter-chip">#${esc(params.get('tag'))}</span>` : '',
+  ].join('');
   const dateCount = new Set(visible.map(r => r.day)).size;
   const mainContent = view === 'review' && review ? reviewPage(review, records, data) : `<header class="main-head${view === 'templates' ? '' : ' timeline-head'}"><div><div class="heading-row"><details class="range-menu"><summary aria-label="选择时间范围">${range[1]} <span aria-hidden="true">⌄</span></summary><div class="range-options">${rangeMenu}</div></details><a class="sort-order local-filter" href="${url(params, { sort: params.get('sort') === 'asc' ? '' : 'asc', page: '' })}" aria-label="${params.get('sort') === 'asc' ? '当前时间正序，点击切换为倒序' : '当前时间倒序，点击切换为正序'}" title="${params.get('sort') === 'asc' ? '时间正序：最早在前' : '时间倒序：最新在前'}"><span aria-hidden="true">${params.get('sort') === 'asc' ? '↑' : '↓'}</span></a></div><p>${total} 条记录 ${filterLabels}</p></div><form class="search-form" role="search"><input type="search" name="q" value="${esc(params.get('q') || '')}" placeholder="搜索 Prompt" aria-label="搜索 Prompt" autocomplete="off"><button type="submit" aria-label="搜索">⌕</button></form></header>${text}${pager}`;
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prompt 日记</title><style>${styles}</style></head><body data-token="${esc(token)}"><main class="shell"><aside class="sidebar"><div class="brand"><div class="eyebrow">PROMPT DIARY</div></div><div class="stats"><a href="/" class="stat"><strong>${visible.length}</strong><span>已收录</span></a><a href="#calendar" class="stat"><strong>${dateCount}</strong><span>记录天数</span></a><a href="#project-filters" class="stat project-shortcut"><strong>${projects.length}</strong><span>历史目录</span></a></div>${heatmap(visible, params)}<nav class="navigation" aria-label="记录视图">${navHTML}</nav><div class="review-navigation"><a class="nav-item${view === 'review' ? ' active' : ''}" href="/?view=review">${icons.review}<span>复盘与沉淀</span></a><a class="nav-item${view === 'templates' ? ' active' : ''}" href="/?view=templates">${icons.templates}<span>Prompt 模板</span></a></div>${projectGroup}${groups('Agent','agent')}<details class="group"${params.get('tag') ? ' open' : ''}><summary><span class="group-title">${icons.tag}标签</span><span class="group-count">${tags.length} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${tagLinks || '<span class="hint">在卡片上添加标签</span>'}</div></details></aside><section class="main">${syncError ? `<div class="history-sync" role="status">${esc(syncError)}</div>` : ''}${running ? `<div class="history-sync" role="status"><span>正在同步历史记录…</span><button type="button" class="show-history-update" hidden>查看更新</button></div>` : ''}${mainContent}</section></main><button type="button" class="selection-copy" hidden aria-live="polite">复制选中文字</button><dialog class="image-dialog" aria-label="图片预览"><button type="button" class="close-preview" aria-label="关闭图片预览">×</button><button type="button" class="preview-prev" aria-label="上一张图片">‹</button><img alt="放大的 Prompt 附件"><button type="button" class="preview-next" aria-label="下一张图片">›</button><div class="preview-count" aria-live="polite"></div></dialog><script nonce="${nonce}">${client}</script></body></html>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prompt 日记</title><style>${styles}</style></head><body data-token="${esc(token)}"><main class="shell"><aside class="sidebar"><div class="brand"><div class="eyebrow">PROMPT DIARY</div></div><div class="stats"><a href="/" class="stat"><strong>${visible.length}</strong><span>已收录</span></a><a href="#calendar" class="stat"><strong>${dateCount}</strong><span>记录天数</span></a><a href="#project-filters" class="stat project-shortcut"><strong>${projectTotal}</strong><span>历史项目</span></a></div>${heatmap(visible, params)}<nav class="navigation" aria-label="记录视图">${navHTML}</nav><div class="review-navigation"><a class="nav-item${view === 'review' ? ' active' : ''}" href="/?view=review">${icons.review}<span>复盘与沉淀</span></a><a class="nav-item${view === 'templates' ? ' active' : ''}" href="/?view=templates">${icons.templates}<span>Prompt 模板</span></a></div>${projectGroup}${agentGroup}<details class="group" id="tag-filters"${params.get('tag') ? ' open' : ''}><summary><span class="group-title">${icons.tag}标签</span><span class="group-count">${tags.length} <span class="group-chevron" aria-hidden="true">⌄</span></span></summary><div class="filter-list">${tagLinks || '<span class="hint">在卡片上添加标签</span>'}</div></details></aside><section class="main">${syncError ? `<div class="history-sync" role="status">${esc(syncError)}</div>` : ''}${running ? `<div class="history-sync" role="status"><span>正在同步历史记录…</span><button type="button" class="show-history-update" hidden>查看更新</button></div>` : ''}${mainContent}</section></main><button type="button" class="selection-copy" hidden aria-live="polite">复制选中文字</button><dialog class="image-dialog" aria-label="图片预览"><button type="button" class="close-preview" aria-label="关闭图片预览">×</button><button type="button" class="preview-prev" aria-label="上一张图片">‹</button><img alt="放大的 Prompt 附件"><button type="button" class="preview-next" aria-label="下一张图片">›</button><div class="preview-count" aria-live="polite"></div></dialog><script nonce="${nonce}">${client}</script></body></html>`;
 }
 
 const client = `
@@ -386,8 +422,10 @@ async function selectRange(path, addHistory = true, replaceHistory = false) {
   if (!oldSidebar || !nextSidebar || !oldMain || !nextMain) throw new Error('筛选失败');
   const scroll = oldSidebar.scrollTop;
   const moreOpen = oldSidebar.querySelector?.('.project-more')?.open;
-  const opened = [...oldSidebar.querySelectorAll('details.group')].map(group => group.open);
-  nextSidebar.querySelectorAll('details.group').forEach((group, i) => { group.open = opened[i]; });
+  const opened = new Map([...oldSidebar.querySelectorAll('details.group')].map(group => [group.id, group.open]));
+  nextSidebar.querySelectorAll('details.group').forEach(group => {
+    group.open = opened.get(group.id) ?? group.open;
+  });
   if (moreOpen && nextSidebar.querySelector?.('.project-more')) nextSidebar.querySelector('.project-more').open = true;
   oldSidebar.replaceWith(nextSidebar);
   nextSidebar.scrollTop = scroll;
@@ -613,6 +651,11 @@ const styles = `
 .prompt th{background:var(--bg)}
 .prompt a{color:var(--accent);text-underline-offset:2px}
 .attachment-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.agent-item{display:flex;justify-content:space-between;gap:6px}
+.agent-item>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.agent-count{font-size:11px;color:var(--muted)}
+.filter-chip.local-filter{text-decoration:none}
+.filter-chip.local-filter:hover{text-decoration:underline}
 .prompt .attachment-label{margin-inline:2px}
 button.attachment-label{background:var(--panel);color:var(--accent);font-family:inherit;cursor:zoom-in;max-width:100%;overflow-wrap:anywhere;text-align:left;padding:1px 6px;border:1px solid var(--line);border-radius:5px}
 button.attachment-label:hover{background:var(--selected)}

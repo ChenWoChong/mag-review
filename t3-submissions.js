@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { submission } from './submissions.js';
 
 const exec = promisify(execFile);
+const agentAliases = new Map([['claudeAgent', 'claude'], ['magpie-codex', 'codex']]);
 
 // T3's CLI transcript drops message IDs and author metadata. Keep the
 // read-only projection schema isolated here until T3 exposes those fields.
@@ -16,7 +17,8 @@ const query = `
               THEN pr.workspace_root
               ELSE coalesce(json_extract(t.payload_json, '$.worktreePath'), pr.workspace_root)
          END AS cwd,
-         coalesce(p.driver, r.provider, t.default_provider) AS agent
+         pr.workspace_root AS projectRoot,
+         coalesce(p.driver, r.provider) AS agent
   FROM orchestration_v2_projection_messages m
   JOIN orchestration_v2_projection_threads t ON m.thread_id = t.thread_id
   LEFT JOIN projection_projects pr ON t.project_id = pr.project_id
@@ -68,7 +70,10 @@ export async function readT3Submissions(dataDirectory, { signal } = {}) {
   try { rows = stdout.trim() ? JSON.parse(stdout) : []; }
   catch (error) { throw new Error('Invalid T3 query result', { cause: error }); }
   return rows.flatMap(row => {
-    const record = submission({ ...row, source: 't3code', agent: row.agent === 'claudeAgent' ? 'claude' : row.agent,
+    const record = submission({
+      ...row,
+      source: 't3code',
+      agent: agentAliases.get(row.agent) || row.agent,
       attachments: submittedAttachments(row.attachments, row.session, row.context),
     });
     return record ? [record] : [];

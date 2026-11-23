@@ -66,9 +66,9 @@ export async function loadRecords(directory) {
   submissions.sort((a, b) => b.submittedAt.localeCompare(a.submittedAt) || b.id.localeCompare(a.id));
   const projects = new Map();
   return Promise.all(submissions.map(async record => {
-    const cwd = record.cwd || '';
-    if (!projects.has(cwd)) projects.set(cwd, projectFor(cwd));
-    const project = await projects.get(cwd);
+    const root = record.projectRoot || record.cwd || '';
+    if (!projects.has(root)) projects.set(root, projectFor(root));
+    const project = await projects.get(root);
     return {
       ...record,
       ...project,

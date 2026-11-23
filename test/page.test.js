@@ -232,7 +232,8 @@ test('time selection replaces content without navigating and preserves sidebar s
   const html = await (await fetch(url)).text();
   const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
   const events = {}, menu = { open: true, contains: () => true };
-  const oldGroups = [{ open: true }, { open: false }], newGroups = [{ open: false }, { open: true }];
+  const oldGroups = [{ id: 'project-filters', open: true }, { id: 'agent-filters', open: false }];
+  const newGroups = [{ id: 'agent-filters', open: false }, { id: 'project-filters', open: false }];
   const oldSidebar = { scrollTop: 42, querySelectorAll: () => oldGroups, replaceWith: value => { assert.equal(value, newSidebar); } };
   const newSidebar = { scrollTop: 0, querySelectorAll: () => newGroups };
   const newMain = {}, oldMain = { querySelector: () => null, replaceWith: value => { assert.equal(value, newMain); } };
@@ -254,7 +255,7 @@ test('time selection replaces content without navigating and preserves sidebar s
   assert.equal(navigated, false);
   assert.equal(request.path, '/?range=today');
   assert.equal(newSidebar.scrollTop, 42);
-  assert.deepEqual(newGroups.map(group => group.open), [true, false]);
+  assert.deepEqual(newGroups.map(group => group.open), [false, true]);
 }));
 
 
@@ -637,11 +638,65 @@ test('project facets follow other filters, retain selected zero counts, and dist
   await writeRecords(directory, records);
   const page = await (await fetch(`${url}/?q=needle&project=${encodeURIComponent('path:/old/two/shared')}`)).text();
   const group = page.split('id="project-filters"')[1].split('id="agent-filters"')[0];
-  assert.match(group, /当前匹配项目数 \/ 全部历史目录数">1 \/ 2/);
+  assert.match(group, /当前匹配项目数 \/ 全部历史项目数">1 \/ 2/);
   assert.match(group, /\/old\/one/);
   assert.match(group, /\/old\/two/);
   assert.match(group, /project-item local-filter active/);
   assert.match(group, /project-count">0</);
   assert.match(group, /project-count">1</);
   assert.match(page, /这里还没有记录/);
+  const ambiguous = await (await fetch(`${url}/?project=shared`)).text();
+  assert.equal((ambiguous.match(/project-item local-filter active/g) || []).length, 1);
+  assert.match(ambiguous, /<p>0 条记录/);
+}));
+
+test('project and Agent counts use the same scope and can clear a zero-result selection', async () => withServer(async (directory, url) => {
+  const today = '2026-01-02';
+  const records = [
+    { id: '1', time: `${today}T10:00:00`, text: 'alpha codex match', cwd: '/work/alpha', agent: 'codex' },
+    { id: '2', time: '2026-01-01T10:00:00', text: 'alpha claude match', cwd: '/work/alpha', agent: 'claude' },
+    { id: '3', time: `${today}T09:00:00`, text: 'beta claude match', cwd: '/work/beta', agent: 'claude' },
+    { id: '4', time: `${today}T08:00:00`, text: 'alpha pi unrelated', cwd: '/work/alpha', agent: 'pi' },
+  ];
+  await writeRecords(directory, records);
+  const params = new URLSearchParams({ date: today, q: 'match', project: 'path:/work/alpha', agent: 'claude' });
+  const page = await (await fetch(`${url}/?${params}`)).text();
+  assert.match(page, /<p>0 条记录/);
+  assert.match(page, /当前匹配项目数 \/ 全部历史项目数">1 \/ 2/);
+  assert.match(page, /当前匹配 Agent 数 \/ 全部历史 Agent 数">1 \/ 3/);
+  assert.match(page, /<span>codex<\/span><span class="agent-count">1/);
+  assert.match(page, /<span>claude<\/span><span class="agent-count">0/);
+  const agentHref = /<a class="filter-item agent-item local-filter active"[^>]*href="([^"]+)"/.exec(page)[1];
+  const clear = new URL(agentHref.replaceAll('&amp;', '&'), url);
+  assert.equal(clear.searchParams.get('date'), today);
+  assert.equal(clear.searchParams.get('project'), 'path:/work/alpha');
+  assert.equal(clear.searchParams.get('q'), 'match');
+  assert.equal(clear.searchParams.has('agent'), false);
+  const cleared = await (await fetch(clear)).text();
+  assert.match(cleared, /data-copy="alpha codex match"/);
+  assert.doesNotMatch(cleared, /data-copy="(?:alpha claude|beta claude)/);
+  assert.match(page, /aria-label="清除项目筛选"/);
+  assert.match(page, /aria-label="清除 Agent 筛选"/);
+}));
+
+test('filters historical worktree URLs by their registered project and supports missing Agent identity', async () => withServer(async (directory, url) => {
+  const projectRoot = '/registered/repo';
+  await writeRecords(directory, [
+    { id: '1', time: '2026-01-02T10:00:00', text: 'original checkout', cwd: projectRoot, projectRoot, agent: 'codex' },
+    { id: '2', time: '2026-01-02T09:00:00', text: 'deleted worktree', cwd: '/worktrees/old', projectRoot, agent: null },
+  ]);
+  const page = await (await fetch(`${url}/?project=${encodeURIComponent('path:/worktrees/old')}`)).text();
+  assert.match(page, /当前匹配项目数 \/ 全部历史项目数">1 \/ 1/);
+  assert.match(page, /class="project-name">repo/);
+  assert.match(page, /<p>2 条记录/);
+  assert.match(page, /工作目录：\/worktrees\/old/);
+  const unknown = await (await fetch(`${url}/?agent=unknown`)).text();
+  assert.match(unknown, /data-copy="deleted worktree"/);
+  assert.doesNotMatch(unknown, /data-copy="original checkout"/);
+  const missing = await (await fetch(`${url}/?agent=missing&project=${encodeURIComponent('path:/old/project')}`)).text();
+  assert.match(missing, /当前匹配项目数 \/ 全部历史项目数">0 \/ 1/);
+  assert.match(missing, /当前匹配 Agent 数 \/ 全部历史 Agent 数">0 \/ 2/);
+  assert.match(missing, /<span>missing<\/span><span class="agent-count">0/);
+  assert.match(missing, /class="filter-item agent-item local-filter active" aria-current="true"/);
+  assert.match(missing, /class="filter-item project-item local-filter active" aria-current="true"/);
 }));

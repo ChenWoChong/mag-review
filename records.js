@@ -1,6 +1,6 @@
-import { readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, readlink, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, basename, dirname, isAbsolute, normalize } from 'node:path';
+import { join, basename, dirname, isAbsolute, normalize, parse, resolve, sep } from 'node:path';
 import { isAutomaticPrompt, parseEntries, splitAttachments } from './diary.js';
 import { readHistory } from './history-import.js';
 import { hashText } from './identity.js';
@@ -13,6 +13,31 @@ export function localDate(value) {
 export function localTime(value) {
   const d = new Date(value);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// Bun's realpath can hang on some macOS folders (for example ~/Downloads),
+// which would leave every page request waiting forever. Resolve symlinks by
+// hand instead; lstat and readlink are reliable in the Magpie plugin host.
+async function canonicalPath(input) {
+  const absolute = resolve(input);
+  const root = parse(absolute).root;
+  let current = root;
+  let queue = absolute.slice(root.length).split(sep).filter(Boolean);
+  let links = 0;
+  while (queue.length) {
+    const part = queue.shift();
+    if (part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    const next = join(current, part);
+    if (!(await lstat(next)).isSymbolicLink()) { current = next; continue; }
+    if (++links > 40) throw Object.assign(new Error('Too many symbolic links'), { code: 'ELOOP' });
+    const target = await readlink(next);
+    const resolved = isAbsolute(target) ? target : resolve(dirname(next), target);
+    const targetRoot = parse(resolved).root;
+    current = targetRoot;
+    queue = [...resolved.slice(targetRoot.length).split(sep).filter(Boolean), ...queue];
+  }
+  return current;
 }
 
 // Older diary entries did not save their session. Magpie's local usage ledger
@@ -38,7 +63,7 @@ async function projectFor(cwd) {
   const original = normalize(cwd);
   let path;
   try {
-    path = await realpath(original);
+    path = await canonicalPath(original);
     if (!(await stat(path)).isDirectory()) throw new Error('not a directory');
   } catch {
     return { project: basename(original), projectId: `path:${original}`, projectKind: 'unconfirmed', projectPath: original };

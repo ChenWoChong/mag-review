@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadRecords } from '../records.js';
@@ -55,5 +55,19 @@ test('project identity uses repository roots and preserves distinct missing path
     assert.equal(root.projectKind, 'git');
     assert.notEqual(loaded.find(r => r.cwd === '/missing/a/repo').projectId, loaded.find(r => r.cwd === '/missing/b/repo').projectId);
     assert.equal(loaded.find(r => r.cwd === '/missing/a/repo').projectKind, 'unconfirmed');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('project identity resolves symlinked directories', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'diary-symlink-'));
+  try {
+    const repo = join(directory, 'repo');
+    const link = join(directory, 'linked');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await symlink(repo, link, 'dir');
+    const records = [repo, link].map((cwd, i) => ({ id: String(i + 1).repeat(64), time: `2026-01-01T10:0${i}:00`, text: `prompt ${i}`, cwd, agent: 'codex' }));
+    await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records }));
+    const loaded = (await loadRecords(directory)).records;
+    assert.equal(loaded.find(r => r.cwd === repo).projectId, loaded.find(r => r.cwd === link).projectId);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, link, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { directoryFor } from './storage.js';
 import * as zlib from 'node:zlib';
 import { eventKey, hashText } from './identity.js';
@@ -67,24 +67,36 @@ export function matchMessages(session, transcript, source) {
   return entries;
 }
 
-async function acquire(directory) {
+export async function acquireHistoryLock(directory) {
   const path = join(directory, '.history-import.lock');
-  try { const f = await open(path, 'wx', 0o600); await f.writeFile(String(process.pid)); await f.close(); return path; }
-  catch (e) {
-    if (e.code !== 'EEXIST') throw e;
-    // A killed host can leave a lock. Only replace one whose process is gone.
-    let pid; try { pid = Number(await readFile(path, 'utf8')); } catch { return null; }
-    if (!Number.isInteger(pid) || pid < 1) return null;
-    try { process.kill(pid, 0); return null; } catch (err) { if (err.code !== 'ESRCH') return null; }
+  const temp = join(directory, `.history-import-${process.pid}-${randomBytes(8).toString('hex')}.lock`);
+  await writeFile(temp, String(process.pid), { flag: 'wx', mode: 0o600 });
+  try {
+    try { await link(temp, path); return path; }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    let value, old;
+    try { old = await stat(path); value = (await readFile(path, 'utf8')).trim(); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    const pid = Number(value);
+    if (!value) {
+      // Older versions could leave an empty file if killed while creating it.
+      if (Date.now() - old.mtimeMs < 120000) return null;
+    } else {
+      if (!Number.isInteger(pid) || pid < 1) return null;
+      try { process.kill(pid, 0); return null; } catch (error) { if (error.code !== 'ESRCH') return null; }
+    }
+    // Do not remove a lock that was replaced while it was being inspected.
+    try { const current = await stat(path); if (current.ino !== old.ino || current.mtimeMs !== old.mtimeMs) return null; }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     await rm(path, { force: true });
-    try { const f = await open(path, 'wx', 0o600); await f.writeFile(String(process.pid)); await f.close(); return path; } catch { return null; }
-  }
+    try { await link(temp, path); return path; } catch (error) { if (error.code === 'EEXIST') return null; throw error; }
+  } finally { await rm(temp, { force: true }); }
 }
 
 export async function importHistory(options = {}) {
   const directory = directoryFor(options);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const lock = await acquire(directory);
+  const lock = await acquireHistoryLock(directory);
   if (!lock) return { busy: true };
   try {
     // Search warms Magpie's index and respects its session-read settings. The

@@ -495,3 +495,55 @@ test('highlights all literal search matches without changing copy text or HTML s
   const normalPrompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(normal)[1];
   assert.doesNotMatch(normalPrompt, /<mark>/);
 }));
+
+test('open menu stays open inside its area and closes after leaving', async () => withServer(async (_directory, url) => {
+  const html = await (await fetch(url)).text();
+  const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)[1];
+  const events = {}, timers = new Map(); let next = 0;
+  const inside = {}, outside = {};
+  const menu = { open: true, contains: item => item === inside };
+  const target = { closest: selector => selector === '.timeline-actions' ? menu : null };
+  const document = { body: { dataset: {} }, querySelector: () => null, addEventListener: (name, fn) => { events[name] = fn; } };
+  const parent = { postMessage() {} }, window = { parent, addEventListener() {} };
+  const setTimer = fn => { const id = ++next; timers.set(id, fn); return id; };
+  runInNewContext(script, { document, window, location: { pathname: '/', search: '' }, setTimeout: setTimer, clearTimeout: id => timers.delete(id) });
+  events.pointerout({ pointerType: 'mouse', target, relatedTarget: inside });
+  assert.equal(timers.size, 0);
+  events.pointerout({ pointerType: 'mouse', target, relatedTarget: outside });
+  assert.equal(menu.open, true);
+  events.pointerover({ target });
+  assert.equal(timers.size, 0);
+  events.pointerout({ pointerType: 'mouse', target, relatedTarget: outside });
+  for (const fn of [...timers.values()]) fn();
+  assert.equal(menu.open, false);
+}));
+
+test('history sync does not reload the page and signals when it finishes', async () => withServer(async (directory, url) => {
+  const { rm } = await import('node:fs/promises');
+  const lock = join(directory, '.history-import.lock');
+  await writeFile(lock, String(process.pid));
+  const page = await (await fetch(url)).text();
+  assert.match(page, /正在同步历史记录/);
+  assert.doesNotMatch(page, /setTimeout\(\(\) => location\.reload\(\), 3000\)/);
+  const token = /<body data-token="([a-f0-9]+)"/.exec(page)[1];
+  const status = async () => (await fetch(`${url}/action`, { method: 'POST', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ type: 'history-status', token }) })).json();
+  assert.equal((await status()).running, true);
+  await rm(lock);
+  assert.equal((await status()).running, false);
+}));
+
+test('all view clears selected calendar date and preserves other filters', async () => withServer(async (directory, url) => {
+  const id = 'a'.repeat(64);
+  await writeFile(join(directory, '2026-01-02.md'), `<!-- magpie-prompt:${id} -->\n## 10:00:00 · codex · /work/project\n\n\`\`\`text\n匹配文本\n\`\`\`\n`);
+  const page = await (await fetch(`${url}/?date=2026-01-02&month=2026-01&project=project&q=${encodeURIComponent('匹配')}`)).text();
+  const nav = /<nav class="navigation"[^>]*>([\s\S]*?)<\/nav>/.exec(page)[1];
+  const all = /<a class="nav-item active" href="([^"]*)">[\s\S]*?<span>全部<\/span><\/a>/.exec(nav);
+  assert.ok(all);
+  const target = new URL(all[1].replaceAll('&amp;', '&'), url);
+  assert.equal(target.searchParams.has('date'), false);
+  assert.equal(target.searchParams.get('month'), '2026-01');
+  assert.equal(target.searchParams.get('project'), 'project');
+  assert.equal(target.searchParams.get('q'), '匹配');
+  const cleared = await (await fetch(target)).text();
+  assert.doesNotMatch(cleared, /class="heat level-\d selected"/);
+}));

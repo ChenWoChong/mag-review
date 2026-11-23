@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { directoryFor } from './storage.js';
 import { importHistory } from './history-import.js';
@@ -54,6 +54,11 @@ export function createDiaryServer(options = {}, dependencies = {}) {
           filteredRequest = true;
           url = new URL(action.path, 'http://127.0.0.1');
           if (url.pathname !== '/' || url.origin !== 'http://127.0.0.1') { res.writeHead(400, cors); return res.end('Invalid path'); }
+        } else if (action.type === 'history-status') {
+          let locked = false;
+          try { await stat(join(directory, '.history-import.lock')); locked = true; }
+          catch (error) { if (error.code !== 'ENOENT') throw error; }
+          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ running: syncing || locked }));
         } else if (action.type === 'review-status') {
           res.writeHead(200, { ...cors, 'Content-Type': 'application/json' }); return res.end(JSON.stringify(reviewJob || { state: 'idle' }));
         } else if (action.type === 'review-start') {

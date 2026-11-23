@@ -19,3 +19,22 @@ test('only imports the active Pi branch', () => {
   const result = sourceMessages('pi', [row('one', null, 'first'), row('old', 'one', 'old branch'), row('new', 'one', 'current branch')].join('\n'));
   assert.deepEqual(result.map(x => x.text), ['first', 'current branch']);
 });
+
+test('recovers old empty import locks while respecting active and fresh locks', async () => {
+  const { mkdtemp, readFile, readdir, rm, utimes, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { acquireHistoryLock } = await import('../history-import.js');
+  const directory = await mkdtemp(join(tmpdir(), 'magpie-lock-test-'));
+  const lock = join(directory, '.history-import.lock');
+  try {
+    await writeFile(lock, '');
+    assert.equal(await acquireHistoryLock(directory), null);
+    const old = new Date(Date.now() - 180000);
+    await utimes(lock, old, old);
+    assert.equal(await acquireHistoryLock(directory), lock);
+    assert.equal(await readFile(lock, 'utf8'), String(process.pid));
+    assert.equal(await acquireHistoryLock(directory), null);
+    assert.deepEqual(await readdir(directory), ['.history-import.lock']);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

@@ -11,6 +11,7 @@ const query = `
   SELECT m.message_id AS messageId, m.thread_id AS session, m.created_at AS submittedAt,
          json_extract(m.payload_json, '$.text') AS text,
          json_extract(m.payload_json, '$.attachments') AS attachments,
+         json_extract(m.payload_json, '$.context') AS context,
          CASE WHEN json_extract(r.payload_json, '$.workspacePreparation.type') = 'root'
               THEN pr.workspace_root
               ELSE coalesce(json_extract(t.payload_json, '$.worktreePath'), pr.workspace_root)
@@ -29,13 +30,33 @@ const query = `
   ORDER BY m.created_at, m.message_id
 `;
 
-function submittedAttachments(value, thread) {
+function imageReferences(value) {
+  let context;
+  try { context = value ? JSON.parse(value) : null; }
+  catch (error) { throw new Error('Invalid T3 context metadata', { cause: error }); }
+  const refs = new Map();
+  if (context?.version !== 1 || !Array.isArray(context.records)) return refs;
+  for (const record of context.records) {
+    if (record?.kind !== 'image' || typeof record.attachmentId !== 'string' || typeof record.contextId !== 'string' || !/^[\w-]+$/.test(record.contextId)) continue;
+    if (!refs.has(record.attachmentId)) refs.set(record.attachmentId, []);
+    refs.get(record.attachmentId).push(record.contextId);
+  }
+  return refs;
+}
+
+function submittedAttachments(value, thread, context) {
   let attachments;
   try { attachments = value ? JSON.parse(value) : []; }
   catch (error) { throw new Error('Invalid T3 attachment metadata', { cause: error }); }
   if (!Array.isArray(attachments)) return [];
+  const refs = imageReferences(context);
   return attachments.filter(item => typeof item?.id === 'string' && /^[\w-]+$/.test(item.id) && item.id.startsWith(`${thread}-`))
-    .map(({ id, name, mimeType }) => ({ id, name: typeof name === 'string' ? name : id, mimeType: typeof mimeType === 'string' ? mimeType : '' }));
+    .map(({ id, name, mimeType }) => ({
+      id,
+      name: typeof name === 'string' ? name : id,
+      mimeType: typeof mimeType === 'string' ? mimeType : '',
+      refs: [...new Set(refs.get(id))],
+    }));
 }
 
 export async function readT3Submissions(dataDirectory, { signal } = {}) {
@@ -48,7 +69,7 @@ export async function readT3Submissions(dataDirectory, { signal } = {}) {
   catch (error) { throw new Error('Invalid T3 query result', { cause: error }); }
   return rows.flatMap(row => {
     const record = submission({ ...row, source: 't3code', agent: row.agent === 'claudeAgent' ? 'claude' : row.agent,
-      attachments: submittedAttachments(row.attachments, row.session),
+      attachments: submittedAttachments(row.attachments, row.session, row.context),
     });
     return record ? [record] : [];
   });

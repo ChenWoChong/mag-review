@@ -23,5 +23,8 @@
     "node": ">=20"
   },
   "main": "./index.js",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "markdown-it": "15.0.3"
+  }
 }

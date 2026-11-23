@@ -59,20 +59,32 @@ test('renders attachment-only submissions and preserves original copy text', asy
     await mkdir(root, { recursive: true });
     const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=', 'base64');
     await writeFile(join(root, 'thread-image.png'), bytes);
-    const attachments = [{ id: 'thread-image', name: 'image.png', mimeType: 'image/png' }];
+    await writeFile(join(root, 'thread-other.png'), bytes);
+    const attachments = [
+      { id: 'thread-other', name: 'image.png', mimeType: 'image/png' },
+      { id: 'thread-image', name: 'image.png', mimeType: 'image/png', refs: ['image_second'] },
+    ];
+    const reference = '![image.png](t3-context://v1/image/image_second)';
+    const context = '<t3_context version="1">\n<context kind="image" id="image_first">\nname: image.png\nattachmentId: thread-other\n</context>\n</t3_context>';
+    const path = '[Attached image "image.png" is saved at: /t3/userdata/attachments/thread-other.png]';
+    const text = `看看图片 ${reference}\n\`[Image: image.png; ref=image_second]\`\n${context}\n${path}`;
     const base = { source: 't3code', session: 'thread', submittedAt: new Date().toISOString() };
     const records = [
-      submission({ ...base, messageId: 'image', text: '', attachments }),
-      submission({ ...base, messageId: 'text', text: '看看图片\n换行 <hello>' }),
+      submission({ ...base, messageId: 'image', text: '', attachments: [attachments[0]] }),
+      submission({ ...base, messageId: 'text', text, attachments }),
     ];
     await withServer(async (directory, url) => {
       await writeSubmissions(directory, records);
       const response = await fetch(url);
       const html = await response.text();
       assert.equal((html.match(/<article class="card">/g) || []).length, 2);
-      assert.match(html, /data-copy="看看图片\n换行 &lt;hello&gt;"/);
-      assert.match(html, /class="attachment-label">image\.png/);
-      assert.match(html, /<div class="pictures" hidden><button type="button" class="image-preview" aria-label="放大查看图片"><img src="data:image\/png;base64,/);
+      const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+      assert.match(prompt, /data-image-id="thread-image"[^>]*>image\.png<\/button>/);
+      assert.match(prompt, /<code>\[Image: image\.png; ref=image_second\]<\/code>/);
+      assert.doesNotMatch(prompt, /t3-context:\/\/|t3_context|is saved at/);
+      assert.match(html, /data-image-id="thread-other"[^>]*>image\.png<\/button>/);
+      assert.match(html, /data-copy="看看图片 !\[image\.png\]\(t3-context:\/\/v1\/image\/image_second\)/);
+      assert.match(html, /<div class="pictures" hidden><button[^>]*aria-label="放大查看图片"[^>]*><img src="data:image\/png;base64,/);
       assert.match(html, /<dialog class="image-dialog" aria-label="图片预览">/);
       assert.match(response.headers.get('content-security-policy'), /img-src data:/);
     }, { t3DataDirectory }, { readSource: async () => records });
@@ -275,10 +287,11 @@ test('navigates only the selected card images with buttons, keys and swipes', as
   const document = { body: { dataset: {} }, querySelector: key => key === '.image-dialog' ? dialog : null, addEventListener: (name, fn) => { const previous = events[name]; events[name] = previous ? event => { previous(event); fn(event); } : fn; } };
   const parent = { postMessage: () => {} }, window = { parent, addEventListener: () => {} };
   runInNewContext(script, { document, window, location: { pathname: '/', search: '' }, setTimeout, clearTimeout });
-  const group = { querySelectorAll: () => buttons };
-  const buttons = ['first', 'second'].map(src => ({ dataset: {}, classList: { contains: name => name === 'image-preview' }, querySelector: () => ({ src }), closest: () => group }));
-  const click = button => events.click({ target: { closest: selector => selector === 'button' ? button : null } });
-  await click(buttons[1]);
+  const images = ['first', 'second'].map(src => ({ src, dataset: { galleryImage: src } }));
+  const card = { querySelectorAll: selector => selector === '[data-gallery-image]' ? images : [] };
+  const button = id => ({ dataset: { imageId: id }, classList: { contains: name => name === 'image-preview' }, closest: selector => selector === '.card' ? card : null });
+  const click = target => events.click({ target: { closest: selector => selector === 'button' ? target : null } });
+  await click(button('second'));
   assert.equal(dialog.open, true);
   assert.equal(preview.src, 'second');
   assert.equal(count.textContent, '2 / 2');
@@ -482,6 +495,25 @@ test('highlights all literal search matches without changing copy text or HTML s
   const normal = await (await fetch(url)).text();
   const normalPrompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(normal)[1];
   assert.doesNotMatch(normalPrompt, /<mark>/);
+}));
+
+test('renders full card Markdown, highlights code and keeps the original source', async () => withServer(async (directory, url) => {
+  const text = '# 设置\n\n先检查 `baseAgent` 和 **版本**。\n\n```yaml\nbaseAgent:\n  classes: {}\n```\n\n- 第一步\n- 第二步\n\n> 提醒\n\n| 键 | 值 |\n| --- | --- |\n| name | demo |\n\n[文档](https://example.com/docs)\n\n<img src="https://example.com/raw" onerror="alert(1)">\n\n![外部图片](https://example.com/remote.png)\n\n[危险链接](javascript:alert%281%29)';
+  await writeRecords(directory, [{ id: 'markdown', time: new Date(), text }]);
+  const html = await (await fetch(`${url}/?q=baseAgent`)).text();
+  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.match(prompt, /<h1>设置<\/h1>/);
+  assert.match(prompt, /<code><mark>baseAgent<\/mark><\/code>/);
+  assert.match(prompt, /<strong>版本<\/strong>/);
+  assert.match(prompt, /<pre><code class="language-yaml"><mark>baseAgent<\/mark>:\n  classes: \{\}/);
+  assert.match(prompt, /<li>第一步<\/li>/);
+  assert.match(prompt, /<blockquote>\s*<p>提醒<\/p>/);
+  assert.match(prompt, /<table>[\s\S]*<td>demo<\/td>/);
+  assert.match(prompt, /<a href="https:\/\/example\.com\/docs">文档<\/a>/);
+  assert.match(prompt, /&lt;img src=/);
+  assert.match(prompt, /外部图片/);
+  assert.doesNotMatch(prompt, /<img|remote\.png|href="javascript:/);
+  assert.match(html, /data-copy="# 设置\n\n先检查 `baseAgent` 和 \*\*版本\*\*。/);
 }));
 
 test('open menu stays open inside its area and closes after leaving', async () => withServer(async (_directory, url) => {

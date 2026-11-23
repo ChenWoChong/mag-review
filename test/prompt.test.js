@@ -44,11 +44,16 @@ async function withT3(run) {
 
 test('accepts T3 submissions by author and message ID, independent of text and provider context', async () => withT3(async (directory, sql) => {
   const attachment = { id: 'thread-image', name: 'image.png', mimeType: 'image/png' };
+  const context = { version: 1, records: [
+    { kind: 'image', attachmentId: 'thread-image', contextId: 'image_one' },
+    { kind: 'image', attachmentId: 'thread-image', contextId: 'image_two' },
+    { kind: 'file', attachmentId: 'thread-image', contextId: 'file_one' },
+  ] };
   sql(insert([
     ['first', { text: '继续', context: { handoff: 'Context handoff (full_thread_summary): prior thread' } }],
     ['second', { text: '继续', creationSource: 'mobile' }],
     ['pasted', { text: `${prefix}\n原样引用\n` }],
-    ['image', { text: '', attachments: [attachment, { id: '../outside', mimeType: 'image/png' }] }],
+    ['image', { text: '', context, attachments: [attachment, { id: '../outside', mimeType: 'image/png' }] }],
     ['handoff', { text: 'Context handoff (full_thread_summary): old\n继续', createdBy: 'agent', creationSource: 'provider' }],
     ['title', { text: '继续', createdBy: 'agent', creationSource: 'server' }],
     ['notification', { text: prefix, notification: {} }],
@@ -65,7 +70,7 @@ test('accepts T3 submissions by author and message ID, independent of text and p
   assert.equal(records[0].agent, 'pi');
   assert.equal(records[0].text, '继续');
   assert.equal(records[1].text, '');
-  assert.deepEqual(records[1].attachments, [attachment]);
+  assert.deepEqual(records[1].attachments, [{ ...attachment, refs: ['image_one', 'image_two'] }]);
   assert.equal(records[2].text, `${prefix}\n原样引用\n`);
   assert.equal(records[3].text, records[0].text);
   assert.notEqual(records[3].id, records[0].id);

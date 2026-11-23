@@ -35,6 +35,9 @@ export async function entryImages(entry, t3DataDirectory) {
   if (entry.source !== 't3code' || !t3DataDirectory || !entry.hasImage) return [];
   let root;
   try { root = await realpath(join(t3DataDirectory, 'userdata', 'attachments')); } catch { return []; }
-  const images = await Promise.all(entry.attachments.map(attachment => preview(attachment, root)));
+  const images = await Promise.all(entry.attachments.map(async attachment => {
+    const src = await preview(attachment, root);
+    return src ? { id: attachment.id, src } : null;
+  }));
   return images.filter(Boolean);
 }

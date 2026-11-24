@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": { "title": "Prompt Diary · Magpie 网关采集", "locale": "zh-CN", "quality_profile": "showcase", "viewBox": [1160, 450] },
+  "components": [
+    { "id": "clients", "type": "external", "label": "模型客户端", "sublabel": "Codex / Pi / Claude Code 等", "pos": [28, 36], "size": [215, 74] },
+    { "id": "gateway", "type": "backend", "label": "Magpie 网关", "sublabel": "接收 HTTP 或 WebSocket 请求", "pos": [333, 36], "size": [215, 74] },
+    { "id": "provider", "type": "external", "label": "模型供应商", "sublabel": "Magpie 负责路由", "pos": [890, 36], "size": [215, 74] },
+    { "id": "hook", "type": "backend", "label": "onRequest", "sublabel": "读取 body 与 ctx", "pos": [333, 196], "size": [215, 74] },
+    { "id": "classify", "type": "backend", "label": "解析与去重", "sublabel": "来源、协议、消息 ID、新输入边界", "pos": [616, 196], "size": [206, 74] },
+    { "id": "db", "type": "database", "label": "SQLite", "sublabel": "gateway-diary.sqlite", "pos": [890, 196], "size": [215, 74] },
+    { "id": "diary", "type": "frontend", "label": "Prompt Diary", "sublabel": "时间线、搜索、复盘与导出", "pos": [890, 344], "size": [215, 74] }
+  ],
+  "connections": [
+    { "from": "clients", "to": "gateway", "label": "模型请求" },
+    { "from": "gateway", "to": "provider", "label": "钩子返回后继续路由" },
+    { "from": "gateway", "to": "hook", "label": "请求钩子", "labelAt": [441, 150], "variant": "emphasis" },
+    { "from": "hook", "to": "classify", "variant": "emphasis" },
+    { "from": "classify", "to": "db", "label": "事务写入", "variant": "emphasis" },
+    { "from": "db", "to": "diary", "label": "读取记录", "labelAt": [998, 306], "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "采集范围", "items": ["默认采集本机来源。时间取网关观测时间。", "模型响应成功与否不影响已提交的日记事务。"] },
+    { "dot": "emerald", "title": "每次请求与每条 Prompt", "items": ["重复或边界不明时可只留观测结果。", "每张卡片关联至少一次已记录的网关观测。"] }
+  ]
+}

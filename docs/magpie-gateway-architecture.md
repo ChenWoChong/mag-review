@@ -47,6 +47,14 @@ flowchart LR
     W --> R["时间线、搜索、复盘、Markdown 导出"]
 ```
 
+交互版架构图的 [Archify 图源](magpie-diary.architecture.json) 与上图描述同一条采集链路。安装 Archify 后，在仓库根目录执行以下命令生成 HTML。
+
+```sh
+node "$ARCHIFY_HOME/bin/archify.mjs" deliver architecture docs/magpie-diary.architecture.json /tmp/magpie-diary.html --quality showcase
+```
+
+`ARCHIFY_HOME` 指向本机 Archify 安装目录。
+
 `package.json` 重新声明 `magpie.hooks`。钩子负责接收请求、提取所需字段、交给存储并返回 `undefined`。页面服务读同一份日记存储，负责筛选、展示和标注。现有 Markdown 渲染、图片预览和复盘流程继续复用。
 
 ### 4.1 数据对象与索引

@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import { t3ContextHref, t3ProviderReference } from './t3-image-markup.js';
 
 const markdown = new MarkdownIt({ breaks: true, html: false });
 const { escapeHtml } = markdown.utils;
@@ -23,30 +24,39 @@ markdown.renderer.rules.fence = (tokens, index, options, env, renderer) => rende
   highlight: content => highlightText(content, env.query),
 }, env, renderer);
 
-// Resolve T3 images only through the current card. Other Markdown images show
-// their alt text without causing network requests or opening local files.
+// Only a card's stored images can open a preview. Other Markdown images use alt text.
 markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
   const token = tokens[index];
-  const src = token.attrGet('src');
-  const ref = /^t3-context:\/\/v1\/image\/([\w-]+)$/.exec(src)?.[1];
-  if (ref && env.imageForRef) {
-    const image = env.imageForRef(ref);
-    if (image) return image;
-  }
-  return highlightText(renderer.renderInlineAsText(token.children, options, env), env.query);
+  const reference = t3ContextHref.exec(token.attrGet('src'));
+  const label = renderer.renderInlineAsText(token.children, options, env);
+  if (reference) return renderReference(reference[1], reference[2], label, env);
+  return highlightText(label, env.query);
 };
 
-markdown.inline.ruler.before('link', 't3_image_ref', (state, silent) => {
-  if (state.src.charCodeAt(state.pos) !== 0x5b || !state.env.imageForRef) return false;
-  const match = /^\[Image: [^\]\r\n]*; ref=([\w-]+)\]/.exec(state.src.slice(state.pos, state.posMax));
-  if (!match) return false;
-  if (!silent) state.push('t3_image_ref', '', 0).meta = { ref: match[1], raw: match[0] };
-  state.pos += match[0].length;
+function renderReference(kind, ref, label, env) {
+  return env.attachmentForRef?.(kind, ref, label) || `<span class="attachment-label">${highlightText(label, env.query)}</span>`;
+}
+
+markdown.inline.ruler.before('link', 't3_reference', (state, silent) => {
+  const first = state.src[state.pos];
+  if (first !== '[' && first !== '!') return false;
+  const source = state.src.slice(state.pos, state.posMax);
+  const marker = t3ProviderReference.exec(source);
+  const link = marker ? null : /^!?\[([^\[\]\r\n]+)\]\((t3-(?:context|thread|citation):\/\/[^)\s]+)\)/.exec(source);
+  const href = link && t3ContextHref.exec(link[2]);
+  const otherLink = link && /^t3-(thread|citation):\/\/v[12]\/[\w%?&=./+~-]+$/.exec(link[2]);
+  if (!marker && !href && !otherLink) return false;
+  if (!silent) {
+    const token = state.push('t3_reference', '', 0);
+    if (marker) token.meta = { kind: marker[1].toLowerCase().replaceAll(' ', '-'), ref: marker[3], label: marker[2] };
+    else token.meta = { kind: (href ?? otherLink)[1], ref: href?.[2], label: link[1] };
+  }
+  state.pos += (marker ?? link)[0].length;
   return true;
 });
-markdown.renderer.rules.t3_image_ref = (tokens, index, _options, env) => {
-  const { ref, raw } = tokens[index].meta;
-  return env.imageForRef(ref) || highlightText(raw, env.query);
+markdown.renderer.rules.t3_reference = (tokens, index, _options, env) => {
+  const { kind, ref, label } = tokens[index].meta;
+  return renderReference(kind, ref, label, env);
 };
 
 export function renderMarkdown(text, env = {}) {

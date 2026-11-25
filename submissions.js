@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { openSync, closeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { normalizeGatewayImages } from './t3-image-markup.js';
+import { normalizeGatewayAttachments } from './t3-image-markup.js';
 import { isPiCompactionSummary, isPiSummarization } from './pi-context.js';
 
 const { Database } = process.versions.bun
@@ -87,7 +87,7 @@ export async function readSubmissions(directory) {
       return db.prepare('SELECT record FROM prompts').all().flatMap(row => {
         const record = JSON.parse(row.record);
         if (record.agent === 'pi' && (isPiSummarization(record.text) || isPiCompactionSummary(record.text))) return [];
-        return [{ ...record, ...normalizeGatewayImages(record.text, record.attachments) }];
+        return [{ ...record, ...normalizeGatewayAttachments(record.text, record.attachments) }];
       });
     } catch (error) { throw new Error('Cannot read diary records', { cause: error }); }
   });

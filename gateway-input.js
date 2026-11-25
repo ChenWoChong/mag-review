@@ -1,6 +1,6 @@
 import { digest } from './submissions.js';
 import { imageMime } from './diary.js';
-import { normalizeGatewayImages } from './t3-image-markup.js';
+import { normalizeGatewayAttachments } from './t3-image-markup.js';
 import { isPiCompactionSummary, isPiSummarization } from './pi-context.js';
 import { normalizeRequest, supportsProtocol } from './gateway-protocol.js';
 
@@ -72,7 +72,7 @@ function candidate(message, position) {
     const image = imageOf(block.raw);
     if (image) images.set(image.id, image);
   }
-  const normalized = normalizeGatewayImages(text, [...images.values()]);
+  const normalized = normalizeGatewayAttachments(text, [...images.values()]);
   if (!normalized.text.trim() && !normalized.attachments.length) return null;
   return { id: boundedString(message.id), position, text: normalized.text, images: normalized.attachments };
 }

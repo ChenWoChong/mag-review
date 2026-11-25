@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { get } from 'node:http';
 import { runInNewContext } from 'node:vm';
 import { createDiaryServer } from '../server.js';
+import { onRequest } from '../prompt.hooks.js';
 import { writeRecords } from './fixtures.mjs';
 
 async function withServer(run, options = {}, dependencies = {}) {
@@ -96,6 +97,58 @@ test('cleans stored gateway context and resolves T3 image positions from stored 
   assert.match(html, /data:image\/png;base64,[^"\s]+" data-gallery-image="byte-hash"/);
   assert.doesNotMatch(html, /t3_context|is saved at|attachmentId: client-id/);
   assert.doesNotMatch(await (await fetch(url)).text(), /# Conversation|earlier context from an ongoing conversation/);
+}));
+
+test('renders mixed T3 context references as inline labels for new and stored prompts', async () => withServer(async (directory, url) => {
+  const kinds = ['image', 'file', 'terminal', 'element', 'preview-annotation', 'review-comment', 'mention', 'skill', 'thread', 'environment', 'response', 'future-kind'];
+  const labelFor = kind => kind === 'file' ? 'Prompt 提取.md' : `Label for ${kind}`;
+  const markerFor = kind => {
+    const name = kind.replaceAll('-', ' ');
+    return `[${name[0].toUpperCase()}${name.slice(1)}: ${labelFor(kind)}; ref=ref-${kind}]`;
+  };
+  const payloadFor = kind => {
+    if (kind === 'image') return 'name: Label for image\nmimeType: image/png\nsizeBytes: 60\nattachmentId: client-image';
+    if (kind === 'file') return 'name: Prompt 提取.md\nmimeType: text/markdown\nsizeBytes: 7857\nattachmentId: client-file';
+    if (kind === 'preview-annotation') return 'comment: Keep this title\nAnd keep its spacing\ntargets: private context';
+    if (kind === 'review-comment') return 'comment:\n  Change this name\n  And this label\ndiff:\n  private context';
+    return 'private context\n```html\n<div>test</div>\n```';
+  };
+  const context = kinds.map(kind => kind === 'thread'
+    ? '<context kind="thread" id="ref-thread" unavailable="true"/>'
+    : `<context kind="${kind}" id="ref-${kind}">\n${payloadFor(kind)}\n</context>`).join('\n');
+  const path = '[Attached file "Prompt 提取.md" is saved at: /Users/test/.t3/userdata/attachments/client-file.md (text extracted to: /Users/test/.t3/userdata/attachments/client-file.txt)]';
+  const refs = kinds.map(markerFor).join(' ');
+  const text = `${refs} **Review it**\n\n<t3_context version="1">\n${context}\n</t3_context>\n\n${path}`;
+  const bytes = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=';
+  await writeRecords(directory, [{ id: 'stored', time: new Date(), text, agent: 'pi' }]);
+  onRequest({ input: [{ role: 'user', content: [{ type: 'input_text', text }, { type: 'input_image', image_url: `data:image/png;base64,${bytes}` }] }] },
+    { origin: 'local', protocol: 'responses', agent: 'pi', session: 'mixed-attachments', options: { directory } });
+  const html = await (await fetch(`${url}/?q=${encodeURIComponent('Prompt 提取')}`)).text();
+  assert.equal((html.match(/<article class="card">/g) || []).length, 2);
+  for (const label of kinds.filter(kind => kind !== 'file').map(labelFor)) assert(html.includes(`>${label}<`), label);
+  assert.match(html, /<span class="attachment-label"><mark>Prompt 提取<\/mark>\.md<\/span>/);
+  assert.match(html, /class="attachment-label image-preview"[^>]*>Label for image<\/button>/);
+  assert.match(html, /<strong>Review it<\/strong>/);
+  assert.match(html, /Keep this title<br>\s*And keep its spacing/);
+  assert.match(html, /Change this name<br>\s*And this label/);
+  assert.doesNotMatch(html, /private context|t3_context|is saved at|text extracted to|attachmentId: client-file/);
+}));
+
+test('renders T3 links and legacy notices without touching fenced examples or ordinary Markdown', async () => withServer(async (directory, url) => {
+  const path = '[Attached file "missing.pdf" is unavailable: could not resolve a saved path for attachment \'missing-id\'.]';
+  const citation = JSON.stringify([{ id: 'assistant-quote-1', citation: { text: 'Private old response snippet', comment: 'Clarify this point' } }]);
+  const text = `[Notes](t3-context://v1/file/file-id) [Existing link](https://example.com/) [Review thread](t3-thread://v2/machine/thread)\n\n[assistant-quote-1]\n\n<assistant_citations>\nThe following citations refer to earlier assistant responses.\n${citation}\n</assistant_citations>\n\n${path}\n\n\`[File: literal; ref=file-literal]\`\n\n\`\`\`xml\n<t3_context version="1">\n<context kind="file" id="file-id" unavailable="true"/>\n</t3_context>\n\`\`\``;
+  await writeRecords(directory, [{ id: 'references', time: new Date(), text }]);
+  const html = await (await fetch(url)).text();
+  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.match(prompt, /<span class="attachment-label">Notes<\/span> <a href="https:\/\/example\.com\/">Existing link<\/a>/);
+  assert.match(prompt, /<span class="attachment-label">missing\.pdf<\/span>/);
+  assert.match(prompt, /<span class="attachment-label">Review thread<\/span>/);
+  assert.match(prompt, /<span class="attachment-label">引用回复<\/span> Clarify this point/);
+  assert.doesNotMatch(html, /assistant_citations|Private old response snippet|t3-thread:\/\/v2\/machine\/thread"\s*>/);
+  assert.match(prompt, /<code>\[File: literal; ref=file-literal\]<\/code>/);
+  assert.match(prompt, /&lt;t3_context version=&quot;1&quot;&gt;/);
+  assert.doesNotMatch(prompt, /could not resolve|href="t3-context:/);
 }));
 
 test('legacy records stay outside the diary even when the confirmed timeline is empty', async () => withServer(async (directory, url) => {

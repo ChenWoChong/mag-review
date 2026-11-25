@@ -1,5 +1,4 @@
 import { entryImages } from './diary.js';
-import { prepareT3Images } from './t3-image-markup.js';
 import { highlightText, renderMarkdown } from './prompt-markdown.js';
 import { annotate, localDate } from './records.js';
 import { dirname } from 'node:path';
@@ -103,10 +102,11 @@ function card(entry, data, directory, query) {
       ? `<button type="button" class="attachment-label image-preview" data-image-id="${esc(attachment.id)}" aria-haspopup="dialog">${content}</button>`
       : `<span class="attachment-label">${content}</span>`;
   };
-  const prepared = prepareT3Images(entry.text, entry.attachments);
+  const byRef = new Map(entry.attachments.flatMap(item => (item.refs || []).map(ref => [ref, item])));
   const shown = new Set();
-  const text = renderMarkdown(prepared.text, { query, imageForRef(ref) {
-    const attachment = prepared.byRef.get(ref);
+  const text = renderMarkdown(entry.text, { query, attachmentForRef(kind, ref) {
+    if (kind !== 'image') return '';
+    const attachment = byRef.get(ref);
     if (!attachment) return '';
     shown.add(attachment.id);
     return renderAttachment(attachment);

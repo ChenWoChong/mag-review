@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { openSync, closeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { normalizeGatewayImages } from './t3-image-markup.js';
+import { isPiCompactionSummary, isPiSummarization } from './pi-context.js';
 
 const { Database } = process.versions.bun
   ? await import('bun:sqlite')
@@ -57,7 +59,7 @@ export function captureRequest(directory, event, classify) {
       const addImage = db.prepare('INSERT INTO images VALUES (?, ?) ON CONFLICT(id) DO NOTHING');
       const link = db.prepare('INSERT OR IGNORE INTO capture_prompts VALUES (?, ?)');
       const findPrompt = db.prepare('SELECT 1 FROM prompts WHERE id = ?');
-      for (const { item, evidence, existingOnly } of decision.items) {
+      for (const { item, evidence, provenance, existingOnly } of decision.items) {
         const promptId = event.scope && item.id ? digest(JSON.stringify([event.scope, item.id])) : digest(`${id}:${item.position}`);
         if (existingOnly) {
           if (findPrompt.get(promptId)) link.run(id, promptId);
@@ -65,7 +67,7 @@ export function captureRequest(directory, event, classify) {
         }
         const attachments = item.images.map(({ bytes: _bytes, ...image }) => image);
         const record = { id: promptId, source: 'magpie', session: event.scope, submittedAt: event.at,
-          text: item.text, cwd: event.cwd, agent: event.agent, attachments, evidence };
+          text: item.text, cwd: event.cwd, agent: event.agent, attachments, evidence, provenance };
         const written = addPrompt.run(promptId, JSON.stringify(record));
         if (written.changes) for (const image of item.images) addImage.run(image.id, image.bytes);
         link.run(id, promptId);
@@ -81,8 +83,13 @@ export function captureRequest(directory, event, classify) {
 
 export async function readSubmissions(directory) {
   return withStore(directory, db => {
-    try { return db.prepare('SELECT record FROM prompts').all().map(row => JSON.parse(row.record)); }
-    catch (error) { throw new Error('Cannot read diary records', { cause: error }); }
+    try {
+      return db.prepare('SELECT record FROM prompts').all().flatMap(row => {
+        const record = JSON.parse(row.record);
+        if (record.agent === 'pi' && (isPiSummarization(record.text) || isPiCompactionSummary(record.text))) return [];
+        return [{ ...record, ...normalizeGatewayImages(record.text, record.attachments) }];
+      });
+    } catch (error) { throw new Error('Cannot read diary records', { cause: error }); }
   });
 }
 

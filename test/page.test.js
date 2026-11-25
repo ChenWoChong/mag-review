@@ -80,6 +80,24 @@ test('renders attachment-only submissions and preserves original copy text', asy
   assert.match(response.headers.get('content-security-policy'), /img-src data:/);
 }));
 
+test('cleans stored gateway context and resolves T3 image positions from stored bytes', async () => withServer(async (directory, url) => {
+  const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aS8AAAAASUVORK5CYII=';
+  const hint = '[Image: screenshot.png; ref=image_one]';
+  const context = '<t3_context version="1">\n<context kind="image" id="image_one">\nname: screenshot.png\nmimeType: image/png\nsizeBytes: 120\nattachmentId: client-id\n</context>\n</t3_context>';
+  const path = '[Attached image "screenshot.png" is saved at: /Users/test/.t3/userdata/attachments/client-id.png]';
+  const transcript = '# Conversation\n[User]: first\n[Assistant]: reply\n\n# Instructions\nThe messages above are earlier context from an ongoing conversation.';
+  await writeRecords(directory, [
+    { time: new Date(), id: 'context', text: transcript, agent: 'pi' },
+    { time: new Date(), id: 'image', text: `**图片** ${hint} 在这里\n\n${context}\n${path}`, agent: 't3code', attachments: [{ id: 'byte-hash', name: '图片.png', mimeType: 'image/png' }] },
+  ], [['byte-hash', Buffer.from(image, 'base64')]]);
+  const html = await (await fetch(`${url}/?view=images&q=${encodeURIComponent('在这里')}`)).text();
+  const prompt = /<div class="prompt">([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.match(prompt, /<strong>图片<\/strong> <button[^>]*data-image-id="byte-hash"[^>]*>screenshot\.png<\/button> <mark>在这里<\/mark>/);
+  assert.match(html, /data:image\/png;base64,[^"\s]+" data-gallery-image="byte-hash"/);
+  assert.doesNotMatch(html, /t3_context|is saved at|attachmentId: client-id/);
+  assert.doesNotMatch(await (await fetch(url)).text(), /# Conversation|earlier context from an ongoing conversation/);
+}));
+
 test('legacy records stay outside the diary even when the confirmed timeline is empty', async () => withServer(async (directory, url) => {
   await writeFile(join(directory, '2026-01-02.md'), '网关交接摘要');
   await writeFile(join(directory, '.history.json'), JSON.stringify({ version: 1, records: [{ text: '原生交接摘要' }] }));

@@ -1,4 +1,16 @@
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { startServer } from './server.js';
+import { directoryFor } from './storage.js';
+
+function startHistoryImport(options) {
+  if (options?.importHistory === false) return;
+  const script = fileURLToPath(new URL('./scripts/import-history.mjs', import.meta.url));
+  const worker = spawn(process.execPath, [script, '--apply', '--if-missing', '--directory', directoryFor(options)],
+    { stdio: ['ignore', 'ignore', 'inherit'], windowsHide: true });
+  worker.on('error', error => console.error('[prompt-diary] could not start history import:', error.code || 'unknown error'));
+  worker.unref();
+}
 
 // A short-lived Magpie CLI host can briefly hold the page port while the app
 // is restarting its plugin host. Keep retrying instead of silently giving up.
@@ -27,7 +39,10 @@ export async function startPageService(options, start = startServer, retryMs = 1
 export default {
   id: 'magpie-prompt-diary',
   server: async (_input, options) => {
-    await startPageService(options);
+    await startPageService(options, async settings => {
+      await startServer(settings);
+      startHistoryImport(settings);
+    });
     return {};
   },
 };

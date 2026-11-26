@@ -112,7 +112,7 @@ function card(entry, data, directory, query) {
     return renderAttachment(attachment);
   } });
   const attachments = entry.attachments.filter(attachment => !shown.has(attachment.id)).map(renderAttachment).join('');
-  const sources = { message_id: 'Magpie 网关 · 消息 ID', legacy_gateway_hook: 'Magpie 网关 · 旧钩子回填' };
+  const sources = { message_id: 'Magpie 网关 · 消息 ID', legacy_gateway_hook: 'Magpie 网关 · 旧钩子回填', deja_export: '本机历史导入 · deja-vu' };
   const source = sources[entry.evidence] || 'Magpie 网关 · 输入边界';
   const pictures = images.size ? `<div class="pictures" hidden>${[...images].map(([id, src]) => `<button type="button" class="image-preview" data-image-id="${esc(id)}" aria-label="放大查看图片" aria-haspopup="dialog"><img src="${src}" data-gallery-image="${esc(id)}" alt="Prompt 附件" loading="lazy"></button>`).join('')}</div>` : '';
   const tags = mark.tags.map(tag => `<span class="tag">${esc(tag)} <button type="button" class="untag" data-ids="${ids}" data-tag="${esc(tag)}" aria-label="移除标签 ${esc(tag)}">×</button></span>`).join('');
@@ -215,7 +215,7 @@ export async function renderPage({ records, data, directory, params, nonce, toke
   const projectLink = project => {
     const current = isCurrentProject(project);
     const parent = nameCounts.get(project.name) > 1 && project.path ? dirname(project.path) : '';
-    const kind = { directory: '其他目录', unconfirmed: '路径未确认', unknown: '未归类' }[project.kind];
+    const kind = { directory: '其他目录', unconfirmed: '路径未确认', unknown: '未归类', history: '本机历史' }[project.kind];
     const detail = [parent, kind].filter(Boolean).join(' · ');
     return `<a class="filter-item project-item local-filter${current ? ' active' : ''}"${current ? ' aria-current="true"' : ''} title="${esc(project.path || project.name)}${kind ? ` · ${kind}` : ''}" href="${facetHref('project', current ? '' : project.id)}"><span class="project-name">${esc(project.name)}${detail ? `<small>${esc(detail)}</small>` : ''}</span><span class="project-count">${project.count}</span></a>`;
   };

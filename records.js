@@ -1,6 +1,7 @@
 import { lstat, readlink, stat } from 'node:fs/promises';
 import { join, basename, dirname, isAbsolute, normalize, parse, resolve, sep } from 'node:path';
 import { readSubmissions } from './submissions.js';
+import { readNativeHistory } from './native-history.js';
 
 const pad = n => String(n).padStart(2, '0');
 export function localDate(value) {
@@ -63,12 +64,18 @@ async function projectFor(cwd) {
 
 export async function loadRecords(directory) {
   const submissions = await readSubmissions(directory);
-  submissions.sort((a, b) => b.submittedAt.localeCompare(a.submittedAt) || b.id.localeCompare(a.id));
+  let history = [];
+  // A missing or unreadable history database must not interrupt live records.
+  try { history = readNativeHistory(directory); } catch {}
+  const records = submissions.concat(history);
+  records.sort((a, b) => b.submittedAt.localeCompare(a.submittedAt) || b.id.localeCompare(a.id));
   const projects = new Map();
-  return Promise.all(submissions.map(async record => {
+  return Promise.all(records.map(async record => {
     const root = record.projectRoot || record.cwd || '';
     if (!projects.has(root)) projects.set(root, projectFor(root));
-    const project = await projects.get(root);
+    const project = record.source === 'native_history' && record.projectName
+      ? { project: record.projectName, projectId: `history:${record.projectName}`, projectKind: 'history', projectPath: '' }
+      : await projects.get(root);
     return {
       ...record,
       ...project,

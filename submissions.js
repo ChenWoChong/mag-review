@@ -3,10 +3,7 @@ import { openSync, closeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeGatewayAttachments } from './t3-image-markup.js';
 import { isPiCompactionSummary, isPiSummarization } from './pi-context.js';
-
-const { Database } = process.versions.bun
-  ? await import('bun:sqlite')
-  : await import('node:sqlite').then(({ DatabaseSync }) => ({ Database: DatabaseSync }));
+import { openDatabase } from './sqlite.js';
 
 export function digest(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -32,7 +29,7 @@ export function withStore(directory, operation) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = join(directory, 'gateway-diary.sqlite');
   closeSync(openSync(path, 'a', 0o600));
-  const db = new Database(path);
+  const db = openDatabase(path);
   try {
     db.exec('PRAGMA busy_timeout = 150; PRAGMA foreign_keys = ON;');
     const mode = Object.values(db.prepare('PRAGMA journal_mode').get())[0];

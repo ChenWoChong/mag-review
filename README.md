@@ -1,6 +1,6 @@
 # Magpie Prompt Diary
 
-Prompt Diary 收录经过 Magpie 网关的模型请求中可识别的新输入。时间线支持 Markdown、图片预览、搜索、收藏、标签、模板和按需复盘。
+Prompt Diary 收录经过 Magpie 网关的可识别新输入，并导入本机 Agent 的历史 Prompt。时间线支持 Markdown、图片预览、搜索、收藏、标签、模板和按需复盘。
 
 ## 安装与启用
 
@@ -14,13 +14,24 @@ magpie plugin list
 
 插件列表应显示 `async gateway hook onRequest` 和 `Prompt Diary` 页面。默认页面端口为 `3479`，可在插件选项中设置 `port`。源码变更后关闭再启用插件以重新加载。
 
+安装依赖时会一并安装 deja-vu CLI。日记页面服务首次启动后，后台会在本机导入 deja-vu 能读取的 Agent 历史。导入完成后刷新页面即可查看。可以将插件选项 `importHistory` 设为 `false` 关闭自动导入。
+
+手动预览或补导历史时可以运行以下命令。插件自定义日记目录时，命令追加 `--directory <目录>`。
+
+```sh
+npm run --silent import-history
+npm run --silent import-history -- --apply
+```
+
+导入记录标明「本机历史导入 · deja-vu」，保留可用的正文、原时间、Agent 和项目名。当前导出包含附件引用，历史图片字节和精确工作目录需要其他来源。重复运行按导出记录的会话、时间和正文去重。实时与历史缺少共同的消息 ID 时会分别显示。更多细节见 [本机历史导入](docs/native-history-import.md)。
+
 ## 采集与存储
 
 - 实时入口是 Magpie 的 `onRequest`，覆盖 Chat Completions、Responses、Anthropic Messages 和 Gemini。已实测本机 Magpie `0.1.4709` 的普通 HTTP、Codex HTTP 直通和两个 Responses WebSocket 入口。钩子返回原请求的控制权，模型失败也可保留已经观测到的输入。
 - 默认只采集宿主标为 `local` 的请求。确认 `magpie-key` 只用于本人流量后，可设置 `captureManagedKeys: true`。共享密钥标记 `gateway-key`、远程及未知来源跳过。
-- 每张卡片在数据库里都有至少一条网关观测。优先使用有作用域的客户端消息 ID。缺少 ID 时，以单条输入、Responses 增量或有序历史前缀判断新边界。歧义请求只记处理结果，卡片来源注明消息 ID 或网关输入边界。`role: user` 只能证明协议角色，归因受客户端提供的元数据限制。
+- 每张实时卡片在数据库里都有至少一条网关观测。优先使用有作用域的客户端消息 ID。缺少 ID 时，以单条输入、Responses 增量或有序历史前缀判断新边界。歧义请求只记处理结果，卡片来源注明消息 ID 或网关输入边界。`role: user` 只能证明协议角色，归因受客户端提供的元数据限制。
 - 系统指令、工具输出及已识别的自动请求不会写入正文。图片只保存网关请求实际带来的 PNG、JPEG、GIF、WebP 字节，单张最多 5 MiB。支持纯图片提交，外部链接和客户端本地路径不用于读取图片。
-- SQLite 存在 `~/.local/share/magpie-prompt-diary/gateway-diary.sqlite`，可通过 `directory` 修改存储目录。记录使用网关观测时间显示为本机时区。旧 T3 快照和历史日志无法逐条证明网关来源，需单独保留备份。新日记从启用采集后开始累积。
+- 实时记录保存在 `~/.local/share/magpie-prompt-diary/gateway-diary.sqlite`，历史导入写同目录下的 `native-history.sqlite`。可通过 `directory` 修改存储目录。实时记录显示网关观测时间，历史记录显示导出携带的时间。
 
 记录以明文保存在本机。手动生成复盘时，所选范围内的 Prompt 文本会发送给选定模型。图片留在本机。产品功能见 [产品文档](docs/product.md)，采集设计见 [网关架构](docs/magpie-gateway-architecture.md)。
 
@@ -32,6 +43,6 @@ npm test
 npm run verify-history
 ```
 
-导出和核对命令可在参数末尾追加日记目录。`verify-history` 检查 SQLite 完整性，以及所有卡片是否有对应的网关观测，输出只有统计数据。
+导出和核对命令可在参数末尾追加日记目录。`verify-history` 检查实时 SQLite 完整性及网关观测的关联，输出只有统计数据。
 
 开发和反馈见 [贡献指南](CONTRIBUTING.md) 与 [安全策略](SECURITY.md)。本项目采用 [MIT 许可证](LICENSE)。
